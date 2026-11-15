@@ -1,6 +1,6 @@
 // "Game time": choose when play starts/ends (one or more games) so processing skips warm-ups,
 // breaks between games and dead time. Includes a quick motion scan that suggests play segments.
-import { $, clamp, fmtTime, fitCanvas, seekVideo, toast } from './util.js';
+import { $, clamp, fmtTime, fitCanvas, seekVideo, setMediaLayout, toast } from './util.js';
 
 const parseTime = s => {
   const p = String(s).trim().split(':').map(Number);
@@ -13,11 +13,15 @@ export function setupTrim({ scanVideo }) {
   const v = $('#trimVideo');
   const st = { segs: [], cur: 0, dur: 0, activity: null, scanning: false, cancel: false, fps: 10 };
 
+  const syncLayout = () => setMediaLayout(v.closest('.player-wrap'), v.videoWidth, v.videoHeight);
+  v.addEventListener('loadedmetadata', syncLayout);
+
   function load(url, duration) {
     st.dur = duration;
     st.segs = [{ start: 0, end: duration }];
     st.cur = 0; st.activity = null;
     v.src = url;
+    if (v.readyState >= 1) syncLayout();
     $('#trimCard').hidden = false;
     render();
   }

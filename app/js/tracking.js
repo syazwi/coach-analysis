@@ -1,4 +1,4 @@
-import { imageToCourt, sideOf, inArea, UNLIMITED, outside } from './court.js';
+import { COURT, imageToCourt, sideOf, inArea, UNLIMITED, outside } from './court.js';
 
 // Re-acquiring a lost player prefers people near the court over spectators far away
 // (ft of cost per ft beyond 10 ft outside the lines). Tracked players are never fenced in.
@@ -90,6 +90,46 @@ export function colorDist(a, b) {
 // feet of position error equivalent to a full colour mismatch
 export const COLOR_WEIGHT = { skeleton: 4, color: 25 };
 const BOX_W = 5; // feet of cost for skeletons that don't overlap the player's last skeleton at all
+const SIDELINE_ACQUIRE_MARGIN = 3; // stale/new tracks must be on court or only just outside it
+const REGULAR_MAX_GAP = 0.75; // after this, use the focused follow look instead of a whole-frame person
+const FOLLOW_MAX_GAP = 1.5;
+const REACQUIRE_MAX_DIST = 8; // feet from the calibrated/predicted position after a long miss
+
+/**
+ * Choose matches for the whole group, not one greedy pair at a time. This is
+ * important when partners rotate across the court: the closest single match
+ * can be wrong even though the lowest-cost assignment for both players is clear.
+ * Maximise the number of matched slots first, then minimise their combined cost.
+ */
+export function optimalAssignment(pairs) {
+  if (!pairs.length) return [];
+  const bySlot = new Map();
+  for (const p of pairs) {
+    if (!bySlot.has(p.si)) bySlot.set(p.si, []);
+    bySlot.get(p.si).push(p);
+  }
+  const slots = [...bySlot.keys()];
+  let best = [], bestCost = Infinity;
+  const usedD = new Set(), chosen = [];
+  const visit = (i, cost) => {
+    if (i === slots.length) {
+      if (chosen.length > best.length || (chosen.length === best.length && cost < bestCost)) {
+        best = chosen.slice(); bestCost = cost;
+      }
+      return;
+    }
+    // It can be better to leave one temporarily occluded player unmatched.
+    visit(i + 1, cost);
+    for (const p of bySlot.get(slots[i])) {
+      if (usedD.has(p.di)) continue;
+      usedD.add(p.di); chosen.push(p);
+      visit(i + 1, cost + p.c);
+      chosen.pop(); usedD.delete(p.di);
+    }
+  };
+  visit(0, 0);
+  return best;
+}
 
 /**
  * Keeps stable player identities. Team A = near side, team B = far side.
@@ -109,6 +149,16 @@ export class Tracker {
     this.seeded = this.slots.some(s => s.ref || s.seed);
     this.inited = false;
     this.firstT = null;
+    this.cameraTransform = [1, 0, 0, 0, 1, 0];
+  }
+
+  setCameraTransform(m) { this.cameraTransform = m || [1, 0, 0, 0, 1, 0]; }
+
+  cameraBox(b) {
+    const m = this.cameraTransform;
+    const pts = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]].map(([x, y]) => [m[0] * x + m[1] * y + m[2], m[3] * x + m[4] * y + m[5]]);
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
   }
 
   /** Where the slot should be now (court ft), from its last position and velocity. */
@@ -134,24 +184,48 @@ export class Tracker {
     return posW * pos + box + (cd === null ? this.colorW * 0.25 : this.colorW * cd);
   }
 
+  /**
+   * A new/stale track may not jump from the court to a person well beyond a sideline.
+   * Once a real player crosses a sideline continuously, keep following them without a fence.
+   */
+  sidelineContinuous(s, d) {
+    const [dSide] = outside(d.cx, d.cy);
+    if (dSide <= SIDELINE_ACQUIRE_MARGIN) return true;
+    const anchor = s.last || s.seed;
+    if (!anchor) return false;
+    const [aSide] = outside(anchor.cx, anchor.cy);
+    const sameEdge = (d.cx < 0 && anchor.cx < 0) || (d.cx > COURT.W && anchor.cx > COURT.W);
+    return aSide > 0.5 && sameEdge && Math.abs(d.cx - anchor.cx) <= 5;
+  }
+
+  /** Candidate close enough to the player's calibration seed to initialise this slot. */
+  seedCompatible(s, d, t) {
+    if (sideOf(d.cy) !== s.side || !this.sidelineContinuous(s, d)) return false;
+    const p = this.predict(s, t);
+    if (!p) return true;
+    // Allow ordinary movement if pose detection takes a moment to find the player, but never
+    // turn a calibrated slot into an arbitrary same-side person.
+    const wait = Math.max(0, t - (this.firstT ?? t));
+    return Math.hypot(d.cx - p[0], d.cy - p[1]) <= 12 + Math.min(8, wait * 4);
+  }
+
+  /** Conservative admission after a track has been missing long enough to need reacquisition. */
+  reacquirable(s, d, t) {
+    if (d.masked || sideOf(d.cy) !== s.side || !this.sidelineContinuous(s, d)) return false;
+    const p = this.predict(s, t);
+    return !p || Math.hypot(d.cx - p[0], d.cy - p[1]) <= REACQUIRE_MAX_DIST;
+  }
+
   initSeeded(t, dets) {
     this.firstT ??= t;
     const posW = this.byColor ? 0.3 : 1;
     const pairs = [];
     this.slots.forEach((s, si) => dets.forEach((d, di) => {
-      if (sideOf(d.cy) === s.side) pairs.push({ si, di, c: this.cost(s, d, posW, t) + farPenalty(d) });
+      if (this.seedCompatible(s, d, t)) pairs.push({ si, di, c: this.cost(s, d, posW, t) + farPenalty(d) });
     }));
-    pairs.sort((a, b) => a.c - b.c);
-    const usedS = new Set(), usedD = new Set();
-    for (const p of pairs) {
-      if (usedS.has(p.si) || usedD.has(p.di)) continue;
-      usedS.add(p.si); usedD.add(p.di);
-    }
-    if (usedS.size < this.slots.length && t - this.firstT < 3) return false;
-    usedS.clear(); usedD.clear();
-    for (const p of pairs) {
-      if (usedS.has(p.si) || usedD.has(p.di)) continue;
-      usedS.add(p.si); usedD.add(p.di);
+    // Start with every reliable partial match instead of waiting for all players.
+    // Missing calibrated slots are then searched directly in their saved boxes.
+    for (const p of optimalAssignment(pairs)) {
       this.commit(this.slots[p.si], dets[p.di], t);
     }
     this.inited = true;
@@ -161,7 +235,9 @@ export class Tracker {
   init(t, dets) {
     if (this.seeded) return this.initSeeded(t, dets);
     this.firstT ??= t;
-    const bySide = side => dets.filter(d => sideOf(d.cy) === side).sort((a, b) => a.cx - b.cx);
+    // With no calibration seed, only acquire players on/next to the playing court. A player
+    // subsequently tracked out wide remains valid through sidelineContinuous().
+    const bySide = side => dets.filter(d => sideOf(d.cy) === side && outside(d.cx, d.cy)[0] <= SIDELINE_ACQUIRE_MARGIN).sort((a, b) => a.cx - b.cx);
     const need = side => this.slots.filter(s => s.side === side).length;
     const near = bySide('near'), far = bySide('far');
     const complete = near.length >= need('near') && far.length >= need('far');
@@ -195,14 +271,18 @@ export class Tracker {
   }
 
   /** Is detection d allowed to continue slot s at time t? */
-  reachable(s, d, t) {
-    if (sideOf(d.cy) !== s.side) return false;
+  reachable(s, d, t, focused = false) {
+    if (sideOf(d.cy) !== s.side || !this.sidelineContinuous(s, d)) return false;
     const dt = t - s.lastT;
+    if (dt < 0 || dt > (focused ? FOLLOW_MAX_GAP : REGULAR_MAX_GAP)) return false;
     const p = this.predict(s, t);
     const dist = Math.hypot(d.cx - p[0], d.cy - p[1]);
     // an erased-zone detection may only continue a player who was just here (stepped into the zone)
     if (d.masked && (dt > 0.5 || dist > 4)) return false;
-    return dist < 3 + 14 * Math.min(dt, 2);
+    // Whole-frame detections get a short leash. A focused zoom may search slightly longer, but
+    // both are capped so a stale track cannot jump across to a spectator.
+    const maxDist = focused ? Math.min(10, 3 + 10 * dt) : Math.min(9, 3 + 14 * dt);
+    return dist < maxDist;
   }
 
   update(t, allDets) {
@@ -216,24 +296,25 @@ export class Tracker {
       if (!s.last) return;
       dets.forEach((d, di) => { if (this.reachable(s, d, t)) pairs.push({ si, di, c: this.cost(s, d, 1, t) }); });
     });
-    pairs.sort((a, b) => a.c - b.c);
     const usedS = new Set(), usedD = new Set();
-    for (const p of pairs) {
-      if (usedS.has(p.si) || usedD.has(p.di)) continue;
+    for (const p of optimalAssignment(pairs)) {
       usedS.add(p.si); usedD.add(p.di);
       out[p.si] = dets[p.di];
     }
-    // re-acquire lost slots with leftover detections on their side
+    // Re-acquire lost slots as a group as well; partners may have completed a
+    // left/right rotation while one or both were briefly hidden.
+    const stalePairs = [];
     this.slots.forEach((s, si) => {
       if (usedS.has(si) || (s.last && t - s.lastT < 1.5)) return;
-      let best = -1, bd = Infinity;
       dets.forEach((d, di) => {
-        if (usedD.has(di) || d.masked || sideOf(d.cy) !== s.side) return;
+        if (usedD.has(di) || !this.reacquirable(s, d, t)) return;
         const c = this.cost(s, d, this.byColor ? 0.2 : 0.5, t) + farPenalty(d); // after a gap, appearance matters more
-        if (c < bd) { bd = c; best = di; }
+        stalePairs.push({ si, di, c });
       });
-      if (best >= 0) { usedS.add(si); usedD.add(best); out[si] = dets[best]; }
     });
+    for (const p of optimalAssignment(stalePairs)) {
+      usedS.add(p.si); usedD.add(p.di); out[p.si] = dets[p.di];
+    }
     out.forEach((d, si) => { if (d) this.commit(this.slots[si], d, t); });
     return out;
   }
@@ -245,7 +326,17 @@ export class Tracker {
   followTargets(t, out) {
     const res = [];
     this.slots.forEach((s, si) => {
-      if (out[si] || !s.last || !s.box || t - s.lastT > 1.5) return;
+      if (out[si]) return;
+      // A calibrated player who has not been acquired yet must get a focused
+      // first look; previously these boxes were only used after first detection.
+      if (!s.last) {
+        if (!s.seed?.box) return;
+        const b = this.cameraBox(s.seed.box);
+        const w = b.x1 - b.x0, h = b.y1 - b.y0;
+        res.push({ si, box: { x0: b.x0 - w * 0.45, x1: b.x1 + w * 0.45, y0: b.y0 - h * 0.3, y1: b.y1 + h * 0.2 } });
+        return;
+      }
+      if (!s.box || t - s.lastT > 1.5) return;
       const b = this.predictBox(s, t), w = b.x1 - b.x0, h = b.y1 - b.y0;
       const g = 0.5 + Math.min(1, t - s.lastT); // search further the longer they've been missing
       res.push({ si, box: { x0: b.x0 - w * g, x1: b.x1 + w * g, y0: b.y0 - h * g * 0.5, y1: b.y1 + h * g * 0.5 } });
@@ -256,7 +347,7 @@ export class Tracker {
   /** Offer a detection found by a follow look to slot si. Returns true when accepted. */
   claim(si, t, d, out) {
     const s = this.slots[si];
-    if (!d || !s.last || !this.reachable(s, d, t)) return false;
+    if (!d || (s.last ? !this.reachable(s, d, t, true) : !this.seedCompatible(s, d, t))) return false;
     // not someone already assigned this frame (e.g. the partner)
     if (out.some((o, k) => o && k !== si && (Math.hypot(o.cx - d.cx, o.cy - d.cy) < 1.5 || boxIoU(o.box, d.box) > 0.5))) return false;
     out[si] = d;

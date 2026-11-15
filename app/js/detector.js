@@ -28,6 +28,8 @@ export class FrameDetector {
     const d = new FrameDetector();
     d.cal = cal; d.vw = vw; d.vh = vh; d.mode = mode; d.area = area; d.thorough = thorough;
     const cropArea = { side: Math.min(area.side, CROP_MAX.side), back: Math.min(area.back, CROP_MAX.back) };
+    d.cropArea = cropArea;
+    d.useCourtRegions = !!(crops || thorough);
     d.regions = crops || thorough ? cropRegions(cal, vw, vh, cropArea) : [{ sx: 0, sy: 0, sw: vw, sh: vh }];
     if (thorough) d.regions.push(...thoroughRegions(cal, vw, vh));
     // a wide view can contain extra people (other courts, spectators): allow more poses per region
@@ -121,6 +123,15 @@ export class FrameDetector {
 
   /** Eraser grid from mask.js (or null). */
   setMask(grid) { this.mask = grid; }
+
+  /** Update court mapping/crops when the camera tracker moves the calibration. */
+  setCalibration(cal) {
+    this.cal = cal;
+    if (!this.useCourtRegions) return;
+    const regions = cropRegions(cal, this.vw, this.vh, this.cropArea);
+    if (this.thorough) regions.push(...thoroughRegions(cal, this.vw, this.vh));
+    if (regions.length) this.regions = regions.slice(0, this.canvases.length);
+  }
 
   close() { this.landmarkers.forEach(l => l.close?.()); if (this.boxLm && !this.landmarkers.includes(this.boxLm)) this.boxLm.close?.(); }
 }

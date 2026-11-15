@@ -68,10 +68,8 @@ export class BallDetector {
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     this.prev = null;
     this.track = [];
-    const s = Math.max(6, area.side), bk = Math.max(10, area.back);
-    const b = imgBox(cal, [[-s, -bk], [20 + s, -bk], [20 + s, 44 + bk], [-s, 44 + bk]]);
-    const h = b.y1 - b.y0;
-    this.roi = { x0: Math.max(0, b.x0), x1: Math.min(1, b.x1), y0: Math.max(0, b.y0 - h * 0.6), y1: Math.min(1, b.y1) };
+    this.area = area;
+    this.setCalibration(cal);
     if (ballCal?.d) {
       const dPx = (ballCal.d * w) / vw;
       const area = Math.PI * (dPx / 2) ** 2;
@@ -82,6 +80,13 @@ export class BallDetector {
     } else {
       this.areaMin = 1; this.areaMax = 70; this.boxMax = 14; this.areaTarget = 8;
     }
+  }
+
+  setCalibration(cal) {
+    const s = Math.max(6, this.area.side), bk = Math.max(10, this.area.back);
+    const b = imgBox(cal, [[-s, -bk], [20 + s, -bk], [20 + s, 44 + bk], [-s, 44 + bk]]);
+    const h = b.y1 - b.y0;
+    this.roi = { x0: Math.max(0, b.x0), x1: Math.min(1, b.x1), y0: Math.max(0, b.y0 - h * 0.6), y1: Math.min(1, b.y1) };
   }
 
   isBall(r, g, b) {

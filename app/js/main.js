@@ -1,5 +1,5 @@
-import { $, $$, bisect, clamp, esc, fmt, fmtPct, fmtTime, median, toast, uid, fitCanvas, seekVideo, loadVideoMeta, download } from './util.js';
-import { makeCalibration, applyH, COURT_LINES, distToNet, UNLIMITED } from './court.js';
+import { $, $$, bisect, clamp, containSize, esc, fmt, fmtPct, fmtTime, median, toast, uid, fitCanvas, seekVideo, setMediaLayout, loadVideoMeta, download } from './util.js';
+import { makeCalibration, calibrationWorkspace, imageToCalibrationCanvas, calibrationCanvasToImage, applyH, COURT_LINES, distToNet, UNLIMITED } from './court.js';
 import { processVideo } from './processor.js';
 import { analyze } from './analysis.js';
 import { coach, buildPlan } from './coach.js';
@@ -21,7 +21,7 @@ const state = {
   view: 'dashboard',
   file: null, fileURL: null,       // currently loaded video file
   draft: null,                     // match being set up
-  calPts: [], dragIdx: -1,
+  calPts: [], calView: null, dragIdx: -1,
   cancel: false,
   match: null, A: null, C: null,   // loaded match, analysis, coach result
   lens: 'all', selected: null, statTab: 'overview',
@@ -200,42 +200,73 @@ const CAL_NAMES = ['far-left', 'far-right', 'near-right', 'near-left'];
 
 function drawCal() {
   const v = procVideo;
-  const scale = Math.min(1, 1280 / v.videoWidth);
-  calCanvas.width = Math.round(v.videoWidth * scale);
-  calCanvas.height = Math.round(v.videoHeight * scale);
+  const view = calibrationWorkspace(v.videoWidth, v.videoHeight);
+  state.calView = view;
+  if (calCanvas.width !== view.width) calCanvas.width = view.width;
+  if (calCanvas.height !== view.height) calCanvas.height = view.height;
   const ctx = calCanvas.getContext('2d');
   const w = calCanvas.width, h = calCanvas.height;
-  ctx.drawImage(v, 0, 0, w, h);
+  const f = view.frame;
+  // The dark margin is usable calibration space for parts of the court cropped out of video.
+  ctx.fillStyle = '#101112'; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(240,239,236,0.38)'; ctx.font = '600 12px Inter, system-ui';
+  ctx.fillText('OUTSIDE VIDEO — estimate where the court lines meet', 12, 20);
+  ctx.drawImage(v, f.x, f.y, f.w, f.h);
+  ctx.strokeStyle = 'rgba(240,239,236,0.65)'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+  ctx.strokeRect(f.x, f.y, f.w, f.h); ctx.setLineDash([]);
   if (state.calPts.length === 4) {
-    try { drawCourtOverlay(ctx, makeCalibration(state.calPts), w, h); } catch { /* degenerate */ }
+    ctx.save();
+    try {
+      ctx.translate(f.x, f.y);
+      drawCourtOverlay(ctx, makeCalibration(state.calPts), f.w, f.h);
+    } catch { /* degenerate */ } finally { ctx.restore(); }
   }
   state.calPts.forEach(([x, y], i) => {
-    ctx.fillStyle = '#199e70'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(x * w, y * h, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const [px, py] = imageToCalibrationCanvas(view, x, y);
+    const offFrame = x < 0 || x > 1 || y < 0 || y > 1;
+    ctx.fillStyle = offFrame ? '#eedd33' : '#199e70'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(px, py, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.fillStyle = '#fff'; ctx.font = '600 13px Inter, system-ui';
-    ctx.fillText(`${i + 1} ${CAL_NAMES[i]}`, x * w + 10, y * h - 8);
+    ctx.fillText(`${i + 1} ${CAL_NAMES[i]}`, clamp(px + 10, 4, w - 110), clamp(py - 8, 16, h - 4));
   });
   const next = state.calPts.length;
+  const outside = state.calPts.filter(([x, y]) => x < 0 || x > 1 || y < 0 || y > 1).length;
   $('#calHint').innerHTML = next < 4
-    ? `Click corner <b>${next + 1}: ${CAL_NAMES[next]}</b> (order: far-left → far-right → near-right → near-left, outer line corners). Drag points to adjust.`
-    : 'Check that the projected court lines sit on the real lines (drag points to fix), then start the analysis.';
+    ? `Click corner <b>${next + 1}: ${CAL_NAMES[next]}</b> (far-left → far-right → near-right → near-left). If it is cropped, place it in the dark <b>outside-video</b> area where the visible lines would meet.`
+    : `Check that the projected court lines sit on the real lines and drag points to adjust.${outside ? ` <b>${outside}</b> corner${outside === 1 ? ' is' : 's are'} outside the video.` : ''}`;
   $('#calConfirm').disabled = next < 4;
 }
-const calPos = e => { const r = calCanvas.getBoundingClientRect(); return [clamp((e.clientX - r.left) / r.width, 0, 1), clamp((e.clientY - r.top) / r.height, 0, 1)]; };
-calCanvas.addEventListener('mousedown', e => {
+const calCanvasPos = e => {
+  const r = calCanvas.getBoundingClientRect();
+  return [(e.clientX - r.left) * calCanvas.width / r.width, (e.clientY - r.top) * calCanvas.height / r.height];
+};
+const calPos = e => {
+  const [px, py] = calCanvasPos(e);
+  const [x, y] = calibrationCanvasToImage(state.calView, px, py);
+  const b = state.calView.bounds;
+  return [clamp(x, b.x0, b.x1), clamp(y, b.y0, b.y1)];
+};
+calCanvas.addEventListener('pointerdown', e => {
   const [x, y] = calPos(e);
   const r = calCanvas.getBoundingClientRect();
-  const hit = state.calPts.findIndex(([px, py]) => Math.hypot((px - x) * r.width, (py - y) * r.height) < 14);
+  const [mx, my] = calCanvasPos(e);
+  const hit = state.calPts.findIndex(([ix, iy]) => {
+    const [px, py] = imageToCalibrationCanvas(state.calView, ix, iy);
+    return Math.hypot((px - mx) * r.width / calCanvas.width, (py - my) * r.height / calCanvas.height) < 14;
+  });
   if (hit >= 0) state.dragIdx = hit;
   else if (state.calPts.length < 4) state.calPts.push([x, y]);
+  calCanvas.setPointerCapture?.(e.pointerId);
+  e.preventDefault();
   drawCal();
 });
-window.addEventListener('mousemove', e => {
+window.addEventListener('pointermove', e => {
   if (state.dragIdx < 0) return;
   state.calPts[state.dragIdx] = calPos(e);
   drawCal();
 });
-window.addEventListener('mouseup', () => { state.dragIdx = -1; });
+window.addEventListener('pointerup', () => { state.dragIdx = -1; });
+window.addEventListener('pointercancel', () => { state.dragIdx = -1; });
 $('#calReset').addEventListener('click', () => { state.calPts = []; drawCal(); });
 attachPlayback(procVideo, {
   playBtn: $('#calPlay'), speedSel: $('#calSpeed'), scrub: $('#calScrub'),
@@ -271,9 +302,10 @@ async function runProcessing() {
   state.cancel = false;
   setStep(5);
   const pc = $('#procCanvas');
-  const scale = Math.min(1, 960 / procVideo.videoWidth);
-  pc.width = Math.round(procVideo.videoWidth * scale);
-  pc.height = Math.round(procVideo.videoHeight * scale);
+  const previewSize = containSize(procVideo.videoWidth, procVideo.videoHeight, { maxWidth: 960, maxHeight: 720 });
+  pc.width = previewSize.width;
+  pc.height = previewSize.height;
+  setMediaLayout(pc.closest('.cal-wrap'), procVideo.videoWidth, procVideo.videoHeight);
   const pctx = pc.getContext('2d');
   let n = 0;
   try {
@@ -286,7 +318,7 @@ async function runProcessing() {
       onFrame: sample => {
         if (n++ % 3) return;
         pctx.drawImage(procVideo, 0, 0, pc.width, pc.height);
-        drawCourtOverlay(pctx, match.cal, pc.width, pc.height);
+        drawCourtOverlay(pctx, sample.c ? makeCalibration(sample.c) : match.cal, pc.width, pc.height);
         sample.p.forEach((p, k) => p && drawSkeleton(pctx, p.lm, pc.width, pc.height, playerColor(match.players, k), 2));
         if (sample.b) { pctx.fillStyle = BALL_COLOR; pctx.beginPath(); pctx.arc(sample.b[0] * pc.width, sample.b[1] * pc.height, 5, 0, 7); pctx.fill(); }
       },
@@ -356,7 +388,7 @@ async function openMatch(match, isNew = false) {
     $('#reimportBtn').hidden = !v.sourceUrl;
     $('#attachNote').textContent = v.sourceUrl ? `Pick the same file, or re-import from ${v.sourceUrl}` : 'Pick the same file you analyzed.';
   }
-  $('#playerWrap').style.aspectRatio = `${v.w} / ${v.h}`;
+  setMediaLayout($('#playerWrap'), v.w, v.h);
   refreshStoreButton();
 }
 
@@ -513,9 +545,9 @@ const symHtml = c => `<span class="cls-sym" style="background:${c.color}">${c.sy
 function renderReview() {
   const { match, R } = state;
   const P = match.players;
-  $('#reviewNote').textContent = R.labeled
+  $('#reviewNote').textContent = R.labeledCount === R.totalRallies
     ? 'Scores use rally outcomes, what the opponent did with each shot, tactical fit and body mechanics.'
-    : 'Label rally outcomes (Rallies & outcomes tab) to include errors and winners in the scores.';
+    : `${R.labeledCount || 0}/${R.totalRallies || 0} rally outcomes labeled. Unlabeled final shots stay neutral; label the outcome to score winners and errors.`;
   $('#accTiles').innerHTML = P.map((p, k) => {
     const pp = R.perPlayer[k];
     return `<div class="acc-tile" style="border-top-color:${playerColor(P, k)}">
@@ -903,6 +935,16 @@ document.addEventListener('keydown', e => {
 });
 
 // ---- overlay drawing
+function calibrationAt(t) {
+  const S = state.match.samples, T = state.A.T;
+  const i = bisect(T, t), a = S[i], b = S[i + 1];
+  if (!a?.c && !b?.c) return state.match.cal;
+  const ca = a?.c || b.c, cb = b?.c || ca;
+  const f = a && b && b.t > a.t ? clamp((t - a.t) / (b.t - a.t), 0, 1) : 0;
+  try { return makeCalibration(ca.map((p, j) => [p[0] + (cb[j][0] - p[0]) * f, p[1] + (cb[j][1] - p[1]) * f])); }
+  catch { return state.match.cal; }
+}
+
 function poseAt(k, t) {
   const S = state.match.samples, T = state.A.T;
   const i = bisect(T, t);
@@ -928,7 +970,7 @@ function calloutTeam(who) {
 
 function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
   const { match, A } = state;
-  if (o.court) drawCourtOverlay(ctx, match.cal, w, h);
+  if (o.court) drawCourtOverlay(ctx, calibrationAt(t), w, h);
   const lw = Math.max(2, w / 500);
   match.players.forEach((p, k) => {
     const pose = poseAt(k, t);
@@ -943,17 +985,34 @@ function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
       drawLabel(ctx, `${p.label}${zone}`, nx, ny - 8, color);
     }
   });
-  // shot flash
-  const sh = o.shot ? A.shots.find(s => Math.abs(s.t - t) < 0.2) : null;
+  // Shot flash and compact game-review rating. Keep the rating visible just
+  // after contact so it can be read without covering the play.
+  const rv = o.shot && state.R?.review
+    ? state.R.review.filter(x => t >= x.t - 0.15 && t <= x.t + 0.85).sort((a, b) => Math.abs(a.t - t) - Math.abs(b.t - t))[0]
+    : null;
+  const sh = rv ? A.shots[rv.j] : (o.shot ? A.shots.find(s => Math.abs(s.t - t) < 0.2) : null);
   if (sh) {
-    const pose = poseAt(sh.slot, t);
+    const pose = poseAt(sh.slot, sh.t);
     if (pose) {
       const wi = sh.wrist === 1 ? L.rw : L.lw;
       const x = pose.lm[wi * 3] * w, y = pose.lm[wi * 3 + 1] * h;
       ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI * 2); ctx.stroke();
-      ctx.font = '600 12px Inter, system-ui'; ctx.fillStyle = '#fff';
-      ctx.fillText(`${sh.type} · ${sh.fh ? 'FH' : 'BH'}`, x + 20, y + 4);
+      const fontSize = Math.max(10, Math.min(13, Math.round(w / 105)));
+      ctx.font = `600 ${fontSize}px Inter, system-ui`; ctx.fillStyle = '#fff';
+      ctx.fillText(`${sh.type} · ${sh.fh ? 'FH' : 'BH'}`, x + 20, y + 2);
+      if (rv) {
+        const c = clsInfo(rv.cls);
+        const label = `${c.sym} ${c.name}`;
+        ctx.font = `700 ${fontSize}px Inter, system-ui`;
+        const tw = ctx.measureText(label).width;
+        const bx = Math.max(4, Math.min(w - tw - 18, x + 18));
+        const by = Math.max(fontSize + 7, Math.min(h - 6, y + fontSize + 9));
+        ctx.fillStyle = 'rgba(17,18,20,0.84)';
+        ctx.beginPath(); ctx.roundRect(bx, by - fontSize - 5, tw + 14, fontSize + 9, 4); ctx.fill();
+        ctx.fillStyle = c.color;
+        ctx.fillText(label, bx + 7, by - 3);
+      }
     }
   }
   // ball trail
@@ -1208,7 +1267,7 @@ $('#statBody').addEventListener('change', e => {
   const f = e.target.dataset.f;
   o[f] = f === 'by' ? +e.target.value : e.target.value;
   // auto-fill winner from an error/winner by a player
-  if (f === 'by' && o.by >= 0 && o.how) {
+  if ((f === 'by' || f === 'how') && o.by >= 0 && o.how) {
     const team = state.match.players[o.by].team;
     o.winner = o.how === 'winner' ? team : team === 'A' ? 'B' : 'A';
     tr.querySelector('[data-f=winner]').value = o.winner;

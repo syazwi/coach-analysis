@@ -44,9 +44,40 @@ export function applyH(H, x, y) {
   return [(H[0] * x + H[1] * y + H[2]) / w, (H[3] * x + H[4] * y + H[5]) / w];
 }
 
-/** imgPts: 4 points in normalized image coords [0..1] in COURT_CORNERS order. */
+/** imgPts: 4 normalized image points in COURT_CORNERS order; values may be outside 0..1. */
 export function makeCalibration(imgPts) {
   return { imgPts, toCourt: solveH(imgPts, COURT_CORNERS), toImg: solveH(COURT_CORNERS, imgPts) };
+}
+
+/**
+ * Expanded canvas used to calibrate a court whose corners are cropped out of the video.
+ * Portrait/short-form video gets one full video-width on each side and 25% above/below;
+ * landscape video gets smaller margins. `frame` is the real video rectangle in canvas px.
+ */
+export function calibrationWorkspace(vw, vh, { maxWidth = 1280, maxHeight = 900 } = {}) {
+  if (!(vw > 0) || !(vh > 0)) throw new Error('Video dimensions are required');
+  const portrait = vh > vw;
+  const padX = vw * (portrait ? 1 : 0.25);
+  const padY = vh * (portrait ? 0.25 : 0.12);
+  const rawW = vw + padX * 2, rawH = vh + padY * 2;
+  const scale = Math.min(1, maxWidth / rawW, maxHeight / rawH);
+  return {
+    width: Math.max(1, Math.round(rawW * scale)),
+    height: Math.max(1, Math.round(rawH * scale)),
+    frame: { x: padX * scale, y: padY * scale, w: vw * scale, h: vh * scale },
+    bounds: { x0: -padX / vw, x1: 1 + padX / vw, y0: -padY / vh, y1: 1 + padY / vh },
+    portrait,
+  };
+}
+
+/** Normalized image point (which may be outside the video) -> calibration canvas px. */
+export function imageToCalibrationCanvas(view, x, y) {
+  return [view.frame.x + x * view.frame.w, view.frame.y + y * view.frame.h];
+}
+
+/** Calibration canvas px -> normalized image point (which may be outside 0..1). */
+export function calibrationCanvasToImage(view, x, y) {
+  return [(x - view.frame.x) / view.frame.w, (y - view.frame.y) / view.frame.h];
 }
 
 // How far outside the lines players can be and still be tracked (feet beyond sidelines / baselines).

@@ -1,5 +1,5 @@
 // Player & ball calibration steps of "New analysis".
-import { $, clamp, esc, fmtTime, seekVideo, toast } from './util.js';
+import { $, clamp, containSize, esc, fmtTime, seekVideo, setMediaLayout, toast } from './util.js';
 import { applyH, sideOf, COURT, imageToCourt, UNLIMITED, outside, inArea } from './court.js';
 import { L } from './pose.js';
 import { FrameDetector } from './detector.js';
@@ -68,9 +68,10 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   const plCanvas = $('#plCanvas');
 
   function drawFrame(canvas) {
-    const scale = Math.min(1, 1280 / video.videoWidth);
-    canvas.width = Math.round(video.videoWidth * scale);
-    canvas.height = Math.round(video.videoHeight * scale);
+    const size = containSize(video.videoWidth, video.videoHeight);
+    if (canvas.width !== size.width) canvas.width = size.width;
+    if (canvas.height !== size.height) canvas.height = size.height;
+    setMediaLayout(canvas.closest('.cal-wrap'), video.videoWidth, video.videoHeight);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     return { ctx, w: canvas.width, h: canvas.height };

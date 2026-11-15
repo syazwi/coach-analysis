@@ -53,6 +53,23 @@ export function fitCanvas(canvas, cssW, cssH) {
   return { ctx, w, h };
 }
 
+/** Preserve source aspect ratio inside a pixel box (no upscaling unless requested). */
+export function containSize(srcW, srcH, { maxWidth = 1280, maxHeight = 900, upscale = false } = {}) {
+  if (!(srcW > 0) || !(srcH > 0)) throw new Error('Source dimensions are required');
+  const scale = Math.min(upscale ? Infinity : 1, maxWidth / srcW, maxHeight / srcH);
+  return { width: Math.max(1, Math.round(srcW * scale)), height: Math.max(1, Math.round(srcH * scale)), scale };
+}
+
+/** Apply source aspect ratio and a viewport-height cap to a video/canvas stage. */
+export function setMediaLayout(stage, srcW, srcH) {
+  if (!stage || !(srcW > 0) || !(srcH > 0)) return;
+  const portrait = srcH > srcW;
+  stage.style.aspectRatio = `${srcW} / ${srcH}`;
+  stage.classList.toggle('portrait-media', portrait);
+  if (portrait) stage.style.setProperty('--portrait-max-width', `${Math.min(78, 78 * srcW / srcH).toFixed(3)}vh`);
+  else stage.style.removeProperty('--portrait-max-width');
+}
+
 export function seekVideo(video, t) {
   return new Promise(resolve => {
     if (Math.abs(video.currentTime - t) < 1e-3 && video.readyState >= 2) return resolve();

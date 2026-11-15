@@ -88,8 +88,8 @@ details { display: flex; flex-direction: column; gap: 10px; }
 .progress.slim { height: 4px; margin: 0; }
 .tips ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
 
-.cal-wrap { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; }
-.cal-wrap canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+.cal-wrap { position: relative; width: 100%; background: #101112; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.cal-wrap canvas { display: block; width: 100%; height: auto; cursor: crosshair; touch-action: none; }
 .trim-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
 #trimBar { width: 100%; height: 44px; display: block; margin-top: 8px; border-radius: 6px; cursor: pointer; }
 .seg-times { display: flex; align-items: center; gap: 6px; color: var(--text-muted); }
@@ -127,8 +127,9 @@ details { display: flex; flex-direction: column; gap: 10px; }
 
 .analysis-grid { display: grid; grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr); gap: 16px; margin-bottom: 16px; }
 .player-wrap { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; }
-.player-wrap video { display: block; width: 100%; height: 100%; }
+.player-wrap video { display: block; width: 100%; height: 100%; object-fit: contain; }
 .player-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cal-wrap.portrait-media, .player-wrap.portrait-media { width: min(100%, var(--portrait-max-width, 44vh)); margin-inline: auto; }
 .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; }
 .controls .sep { width: 1px; height: 20px; background: var(--border); }
 .speed button { background: var(--surface-2); border: 1px solid var(--border); color: var(--text-secondary); padding: 3px 7px; cursor: pointer; font: inherit; font-size: 12px; }

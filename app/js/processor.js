@@ -4,6 +4,7 @@ import { BallDetector } from './ball.js';
 import { seekVideo, median } from './util.js';
 import { areaOf, CROP_MAX } from './court.js';
 import { toGrid } from './mask.js';
+import { CameraCalibrationTracker } from './camera.js';
 
 /** Every analysis time step across the game segments: [{ t, seg }]. */
 export function frameTimes(segments, step) {
@@ -59,17 +60,31 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
   async function pass(order, dir) {
     if (!order.length) return true;
     const tracker = new Tracker(players, trackOpts);
+    const camera = new CameraCalibrationTracker(cal, vw, vh);
     const tRef = times[order[0]].t;
     let prevSeg = -1;
+    // Backward tracking starts from the same calibrated frame as the forward pass,
+    // then follows camera motion in reverse toward the beginning.
+    if (dir < 0 && forward.length) {
+      await seekVideo(video, times[forward[0]].t);
+      camera.update(video);
+    }
     for (const i of order) {
       if (isCancelled?.()) return false;
       const { t, seg } = times[i];
-      if (ball && seg !== prevSeg) ball.prev = null; // no motion diff across a skipped gap
+      if (seg !== prevSeg) {
+        if (ball) ball.prev = null; // no motion diff across a skipped gap
+      }
       prevSeg = seg;
       const vt = dir > 0 ? t : tRef + (tRef - t);
       await seekVideo(video, t);
+      const cameraState = camera.update(video);
+      detector.setCalibration(cameraState.cal);
+      ball?.setCalibration(cameraState.cal);
+      tracker.setCameraTransform(cameraState.transform);
       const assigned = tracker.update(vt, detector.detect(video, step * 1000));
-      // follow: a player missed by the regular crops gets a zoomed look around their last skeleton
+      // Follow/acquire: search a missed player around their saved calibration box first,
+      // then around their last tracked skeleton once tracking has started.
       for (const { si, box } of tracker.followTargets(vt, assigned)) {
         for (const d of detector.detectBox(video, box, { pad: 0, all: true }).sort((a, b) => tracker.cost(tracker.slots[si], a, 1, vt) - tracker.cost(tracker.slots[si], b, 1, vt))) {
           if (tracker.claim(si, vt, d, assigned)) break;
@@ -78,6 +93,8 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
       const b = ball ? ball.detect(video, t) : null;
       const sample = {
         t: +t.toFixed(3),
+        c: cameraState.cal.imgPts.map(([x, y]) => [+x.toFixed(6), +y.toFixed(6)]),
+        cm: +cameraState.confidence.toFixed(2),
         p: assigned.map(d => (d ? { lm: d.lm, cx: +d.cx.toFixed(2), cy: +d.cy.toFixed(2), conf: +d.conf.toFixed(2) } : null)),
         b: b ? [+b[0].toFixed(4), +b[1].toFixed(4)] : null,
       };
@@ -91,10 +108,10 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
     return true;
   }
 
-  onStatus?.(`Following players${backward.length ? ' from the calibration frame' : ''} (${segments.length} segment${segments.length > 1 ? 's' : ''})…`);
+  onStatus?.(`Following camera and players${backward.length ? ' from the calibration frame' : ''} (${segments.length} segment${segments.length > 1 ? 's' : ''})…`);
   try {
     if (await pass(forward, 1)) {
-      if (backward.length) onStatus?.('Following players back to the start…');
+      if (backward.length) onStatus?.('Following camera and players back to the start…');
       await pass(backward, -1);
     }
   } finally {

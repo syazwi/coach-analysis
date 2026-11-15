@@ -2,10 +2,11 @@
 <html><head><meta charset="utf-8"><title>CourtSense self-test</title></head>
 <body><pre id="out">running…</pre>
 <script type="module">
-import { makeCalibration, applyH } from '../js/court.js';
+import { makeCalibration, calibrationWorkspace, imageToCalibrationCanvas, calibrationCanvasToImage, applyH } from '../js/court.js';
 import { analyze } from '../js/analysis.js';
 import { coach, buildPlan } from '../js/coach.js';
 import { matchToJSON, matchFromJSON } from '../js/db.js';
+import { containSize, setMediaLayout } from '../js/util.js';
 
 const out = document.getElementById('out');
 const log = [];
@@ -16,6 +17,37 @@ try {
   const cal = makeCalibration([[0.38, 0.30], [0.62, 0.30], [0.85, 0.92], [0.15, 0.92]]);
   const back = applyH(cal.toCourt, 0.15, 0.92);
   check('homography round-trip', Math.abs(back[0] - 0) < 1e-6 && Math.abs(back[1] - 44) < 1e-6, back.map(v => v.toFixed(3)).join(','));
+
+  // camera pan/zoom: robustly move the original calibration while ignoring moving-player outliers
+  const { applyAffine, calibrationFromTransform, robustSimilarity } = await import('../js/camera.js');
+  const cameraMove = [1.025, 0, 0.018, 0, 1.025, -0.012];
+  const staticPts = [[0.2, 0.25], [0.5, 0.22], [0.8, 0.28], [0.25, 0.55], [0.52, 0.58], [0.76, 0.62], [0.35, 0.82], [0.7, 0.84]];
+  const motionPairs = staticPts.map(from => ({ from, to: applyAffine(cameraMove, ...from) }));
+  motionPairs.push({ from: [0.4, 0.4], to: [0.65, 0.2] }, { from: [0.6, 0.6], to: [0.3, 0.75] }); // players, not camera
+  const cameraFit = robustSimilarity(motionPairs, 1920, 1080);
+  const fitProbe = applyAffine(cameraFit.affine, 0.42, 0.67), expectedProbe = applyAffine(cameraMove, 0.42, 0.67);
+  check('camera motion fit rejects moving-player outliers', cameraFit.inliers.length === staticPts.length && Math.hypot(fitProbe[0] - expectedProbe[0], fitProbe[1] - expectedProbe[1]) < 1e-6);
+  const movedCal = calibrationFromTransform(cal, cameraMove);
+  const oldNet = applyH(cal.toImg, 10, 22), movedNet = applyH(movedCal.toImg, 10, 22), expectedNet = applyAffine(cameraMove, ...oldNet);
+  check('camera motion carries court calibration', Math.hypot(movedNet[0] - expectedNet[0], movedNet[1] - expectedNet[1]) < 1e-6, movedNet.map(v => v.toFixed(3)).join(','));
+
+  // portrait/short-form footage: missing court corners can be placed outside the video frame
+  const portraitView = calibrationWorkspace(1080, 1920);
+  const outsideImage = [-0.8, 1.15];
+  const outsideCanvas = imageToCalibrationCanvas(portraitView, ...outsideImage);
+  const outsideBack = calibrationCanvasToImage(portraitView, ...outsideCanvas);
+  const portraitFrameRatio = portraitView.frame.w / portraitView.frame.h;
+  check('portrait calibration workspace has out-of-frame margins', portraitView.portrait && portraitView.width <= 1280 && portraitView.height <= 900 && outsideCanvas[0] >= 0 && outsideCanvas[0] <= portraitView.width && outsideCanvas[1] >= 0 && outsideCanvas[1] <= portraitView.height && Math.abs(portraitFrameRatio - 1080 / 1920) < 1e-9,
+    `${portraitView.width}×${portraitView.height}, frame ${portraitView.frame.w.toFixed(0)}×${portraitView.frame.h.toFixed(0)}`);
+  check('out-of-frame calibration coordinate round-trip', Math.abs(outsideBack[0] - outsideImage[0]) < 1e-9 && Math.abs(outsideBack[1] - outsideImage[1]) < 1e-9, outsideBack.map(v => v.toFixed(2)).join(','));
+  const portraitCal = makeCalibration([[-0.6, 0.18], [1.6, 0.18], [1.3, 1.08], [-0.3, 1.08]]);
+  const portraitCorner = applyH(portraitCal.toImg, 0, 44);
+  check('homography supports court corners outside video', Math.abs(portraitCorner[0] + 0.3) < 1e-6 && Math.abs(portraitCorner[1] - 1.08) < 1e-6, portraitCorner.map(v => v.toFixed(2)).join(','));
+  const portraitPreview = containSize(1080, 1920, { maxWidth: 1280, maxHeight: 900 });
+  check('portrait preview is contained by width and height', portraitPreview.width <= 1280 && portraitPreview.height <= 900 && Math.abs(portraitPreview.width / portraitPreview.height - 1080 / 1920) < 0.002, `${portraitPreview.width}×${portraitPreview.height}`);
+  const portraitStage = document.createElement('div');
+  setMediaLayout(portraitStage, 1080, 1920);
+  check('portrait stage gets viewport-height layout', portraitStage.classList.contains('portrait-media') && portraitStage.style.aspectRatio === '1080 / 1920' && portraitStage.style.getPropertyValue('--portrait-max-width').endsWith('vh'), portraitStage.style.getPropertyValue('--portrait-max-width'));
 
   const players = [
     { team: 'A', label: 'Me', isMe: true }, { team: 'A', label: 'Partner' },
@@ -146,13 +178,29 @@ try {
   check('crop regions valid for very wide area', regs.length === 2 && regs.every(r => r.sx >= 0 && r.sy >= 0 && r.sx + r.sw <= 1920 && r.sy + r.sh <= 1080 && r.sw > 100 && r.sh > 50), regs.map(r => `${r.sw}x${r.sh}`).join(', '));
 
   // ---- accuracy (game review)
-  const { computeAccuracy } = await import('../js/accuracy.js');
+  const { computeAccuracy, decisiveOutcome } = await import('../js/accuracy.js');
   const R = computeAccuracy(match, A);
   check('every shot rated', R.review.length === A.shots.length && R.review.every(x => x.score >= 0 && x.score <= 100));
   const accMe = R.perPlayer[0].accuracy, accP = R.perPlayer[1].accuracy;
   check('errors count as blunders', R.perPlayer[0].counts.blunder >= 4, `Me blunders: ${R.perPlayer[0].counts.blunder}`);
   check('winner rated brilliant', R.perPlayer[1].counts.brilliant >= 1, `Partner brilliant: ${R.perPlayer[1].counts.brilliant}`);
   check('accuracy: error-prone player lower', accMe < accP, `Me ${accMe.toFixed(1)}% vs Partner ${accP.toFixed(1)}%; all: ${R.perPlayer.map(p => p.accuracy.toFixed(0)).join(' / ')}`);
+  const winnerRally = A.rallies.find(r => r.outcome?.how === 'winner');
+  const savedBy = winnerRally.outcome.by;
+  winnerRally.outcome.by = String(savedBy); // imported/older matches can store this as text
+  const stringWinner = decisiveOutcome(winnerRally, winnerRally.outcome, A.shots, players);
+  const Rstring = computeAccuracy(match, A);
+  check('text player id still credits the winning shot', stringWinner?.slot === savedBy && Rstring.review[stringWinner.j].score === 100 && Rstring.review[stringWinner.j].cls === 'brilliant');
+  winnerRally.outcome.by = -1;
+  const inferredWinner = decisiveOutcome(winnerRally, winnerRally.outcome, A.shots, players);
+  check('missing winner player falls back to winning team last shot', inferredWinner && players[inferredWinner.slot].team === winnerRally.outcome.winner && computeAccuracy(match, A).review[inferredWinner.j].score === 100);
+  winnerRally.outcome.by = savedBy;
+  const savedOutcome = winnerRally.outcome;
+  winnerRally.outcome = null;
+  const neutralR = computeAccuracy(match, A);
+  const finalJ = winnerRally.shots.at(-1);
+  check('unlabeled final shot is not called a mistake', neutralR.review[finalJ].score >= 74 && !['mistake', 'blunder'].includes(neutralR.review[finalJ].cls));
+  winnerRally.outcome = savedOutcome;
 
   // ---- player calibration: partners in different shirts cross paths; identities must survive
   const { Tracker } = await import('../js/tracking.js');
@@ -171,6 +219,33 @@ try {
     if (out[1] && out[1].color !== BLUE) swapped = true;
   }
   check('calibrated tracker keeps identities when partners cross', !swapped);
+  // A greedy closest-pair match swaps these players: Q->P is locally cheapest,
+  // but P->P plus Q->Q is the better assignment for the pair as a whole.
+  const trRotate = new Tracker([{ team: 'A', label: 'P' }, { team: 'A', label: 'Q' }]);
+  trRotate.update(0, [{ id: 'P', cx: 0, cy: 35, conf: 0.9 }, { id: 'Q', cx: 4, cy: 35, conf: 0.9 }]);
+  const rotated = trRotate.update(0.4, [{ id: 'P', cx: 3, cy: 35, conf: 0.9 }, { id: 'Q', cx: 8, cy: 35, conf: 0.9 }]);
+  check('team-wide assignment keeps identities during rotation', rotated[0]?.id === 'P' && rotated[1]?.id === 'Q', rotated.map(x => x?.id || 'missing').join(' / '));
+  const seedBox = (cx, cy) => ({ x0: cx / 40, x1: cx / 40 + 0.04, y0: cy / 60, y1: cy / 60 + 0.12 });
+  const trSeed = new Tracker([
+    { team: 'A', label: 'Me', seed: { cx: 5, cy: 35, box: seedBox(5, 35) } },
+    { team: 'A', label: 'Partner', seed: { cx: 15, cy: 35, box: seedBox(15, 35) } },
+    { team: 'B', label: 'Opp 1', seed: { cx: 5, cy: 9, box: seedBox(5, 9) } },
+    { team: 'B', label: 'Opp 2', seed: { cx: 15, cy: 9, box: seedBox(15, 9) } },
+  ]);
+  const seedOut = trSeed.update(0, [{ id: 'O1', cx: 5, cy: 9, conf: 0.9 }, { id: 'O2', cx: 15, cy: 9, conf: 0.9 }]);
+  const seedTargets = trSeed.followTargets(0, seedOut);
+  const meTarget = seedTargets.find(x => x.si === 0), partnerTarget = seedTargets.find(x => x.si === 1);
+  const meClaimed = trSeed.claim(0, 0, { id: 'Me', cx: 5, cy: 35, conf: 0.9, box: seedBox(5, 35) }, seedOut);
+  const partnerClaimed = trSeed.claim(1, 0, { id: 'Partner', cx: 15, cy: 35, conf: 0.9, box: seedBox(15, 35) }, seedOut);
+  check('calibration boxes acquire players missed by regular detection', seedOut[2]?.id === 'O1' && seedOut[3]?.id === 'O2' && meTarget && partnerTarget && meClaimed && partnerClaimed && seedOut[0]?.id === 'Me' && seedOut[1]?.id === 'Partner');
+  const trMovingSeed = new Tracker([{ team: 'A', label: 'Me', seed: { cx: 5, cy: 35, box: seedBox(5, 35) } }]);
+  trMovingSeed.setCameraTransform(cameraMove);
+  const movingTarget = trMovingSeed.followTargets(0, [null])[0];
+  const originalCentre = [(seedBox(5, 35).x0 + seedBox(5, 35).x1) / 2, (seedBox(5, 35).y0 + seedBox(5, 35).y1) / 2];
+  const movedSeedBox = trMovingSeed.cameraBox(seedBox(5, 35));
+  const targetCentre = [(movedSeedBox.x0 + movedSeedBox.x1) / 2, (movedSeedBox.y0 + movedSeedBox.y1) / 2];
+  const movedCentre = applyAffine(cameraMove, ...originalCentre);
+  check('camera motion carries saved player calibration boxes', Math.hypot(targetCentre[0] - movedCentre[0], targetCentre[1] - movedCentre[1]) < 1e-9 && movedCentre[0] > movingTarget.box.x0 && movedCentre[0] < movingTarget.box.x1 && movedCentre[1] > movingTarget.box.y0 && movedCentre[1] < movingTarget.box.y1);
   const tr2 = new Tracker([{ team: 'A', label: 'x', seed: { cx: 15, cy: 30 }, color: RED }, { team: 'A', label: 'y', seed: { cx: 5, cy: 30 }, color: BLUE }]);
   const o2 = tr2.update(0, [{ cx: 5, cy: 30, color: BLUE }, { cx: 15, cy: 30, color: RED }]);
   check('seeded init assigns by calibration', o2[0]?.color === RED && o2[1]?.color === BLUE);
@@ -201,6 +276,26 @@ try {
   const partnerClaim = trF2.claim(0, 0.1, { cx: 4.3, cy: 35, box: box(4.2, 35) }, miss);
   const okClaim = trF2.claim(0, 0.1, { cx: 10.3, cy: 35.2, box: box(10.3, 35.2) }, miss);
   check('follow look recovers a missed player, not the partner', targets.length === 1 && targets[0].si === 0 && !partnerClaim && okClaim && miss[0].cx === 10.3);
+  // stale tracks must not jump to seated/standing people well outside the sidelines
+  const trSide = new Tracker([{ team: 'A', label: 'Player', color: GREY, seed: { cx: 8, cy: 35, box: box(8, 35) } }]);
+  trSide.update(0, [{ cx: 8, cy: 35, color: GREY, box: box(8, 35) }]);
+  trSide.update(0.1, []);
+  const stoleLeft = trSide.update(2, [{ cx: -7, cy: 35, color: GREY, box: box(-7, 35) }]);
+  const trSideR = new Tracker([{ team: 'A', label: 'Player', color: GREY, seed: { cx: 12, cy: 35, box: box(12, 35) } }]);
+  trSideR.update(0, [{ cx: 12, cy: 35, color: GREY, box: box(12, 35) }]);
+  trSideR.update(0.1, []);
+  const stoleRight = trSideR.update(2, [{ cx: 27, cy: 35, color: GREY, box: box(27, 35) }]);
+  check('stale track rejects left/right sideline spectators', stoleLeft[0] === null && stoleRight[0] === null);
+  const foundAgain = trSide.update(2.1, [{ cx: 11, cy: 35, color: GREY, box: box(11, 35) }]);
+  check('stale track can reacquire the player near the court', foundAgain[0]?.cx === 11);
+  // A genuine player may still run out wide when their motion is continuous frame to frame.
+  const trWide = new Tracker([{ team: 'A', label: 'Wide', seed: { cx: 1, cy: 35, box: box(1, 35) } }]);
+  let wide = null;
+  for (let i = 0; i <= 6; i++) {
+    const cx = 1 - i;
+    wide = trWide.update(i / 10, [{ cx, cy: 35, box: box(cx, 35) }]);
+  }
+  check('continuously tracked player may run outside the sideline', wide[0]?.cx === -5);
   // processing starts at the calibration frame, then goes back to the start
   const { frameTimes, processingOrder } = await import('../js/processor.js');
   const ft = frameTimes([{ start: 0, end: 2 }, { start: 5, end: 6 }], 0.5);

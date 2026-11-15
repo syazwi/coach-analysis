@@ -27,6 +27,30 @@ export const PHASES = [
 
 const ATTACK_TYPES = new Set(['Volley / speed-up', 'Overhead']);
 
+function playerIndex(value, count) {
+  if (value === '' || value === null || value === undefined || value === -1 || value === '-1') return -1;
+  const k = Number(value);
+  return Number.isInteger(k) && k >= 0 && k < count ? k : -1;
+}
+
+// Resolve the shot that decided a labeled rally. Older/imported matches may
+// store `by` as text. If it is absent, fall back to the appropriate team's
+// last detected shot so a labeled winner is still reflected in the score.
+export function decisiveOutcome(rally, outcome, shots, players) {
+  if (!rally || !outcome || !['winner', 'error'].includes(outcome.how)) return null;
+  const by = playerIndex(outcome.by, players.length);
+  const candidates = rally.shots.filter(j => shots[j]);
+  let j = by >= 0 ? candidates.filter(x => shots[x].slot === by).at(-1) : undefined;
+  if (j === undefined && outcome.winner) {
+    const team = outcome.how === 'winner'
+      ? outcome.winner
+      : (outcome.winner === 'A' ? 'B' : outcome.winner === 'B' ? 'A' : null);
+    if (team) j = candidates.filter(x => players[shots[x].slot]?.team === team).at(-1);
+  }
+  if (j === undefined) return null;
+  return { j, slot: shots[j].slot, how: outcome.how, inferred: by < 0 || shots[j].slot !== by };
+}
+
 export function computeAccuracy(match, A) {
   const { shots, rallies, series, handed, T } = A;
   const players = match.players;
@@ -41,25 +65,25 @@ export function computeAccuracy(match, A) {
     for (let i = bisect(T, t); i < T.length && T[i] <= t + 8; i++) if (Number.isFinite(s.y[i]) && distToNet(s.y[i]) <= 10) return T[i] - t;
     return Infinity;
   };
+  const decisive = rallies.map(r => decisiveOutcome(r, r.outcome, shots, players));
 
   const review = shots.map((sh, j) => {
     const r = rallies[sh.rally];
     const o = r?.outcome;
     const next = shots[j + 1] && shots[j + 1].rally === sh.rally ? shots[j + 1] : null;
-    const isLastOfRally = !next;
-    const myLaterShot = r.shots.slice(r.shots.indexOf(j) + 1).some(x => shots[x].slot === sh.slot);
+    const result = decisive[sh.rally];
     const opps = players.map((p, k) => (p.team !== sh.team ? k : -1)).filter(k => k >= 0);
     let score = 82;
     const why = [];
     const add = (d, text) => { score += d; why.push({ d, text }); };
 
     // --- outcome (needs labels)
-    if (o?.how === 'error' && o.by === sh.slot && !myLaterShot) { score = 8; why.push({ d: -74, text: 'Unforced error — ended the rally' }); }
-    else if (o?.how === 'winner' && o.by === sh.slot && !myLaterShot) { score = 100; why.push({ d: 18, text: 'Winner' }); }
+    if (result?.j === j && result.how === 'error') { score = 8; why.push({ d: -74, text: 'Unforced error — ended the rally' }); }
+    else if (result?.j === j && result.how === 'winner') { score = 100; why.push({ d: 18, text: result.inferred ? 'Point-winning shot' : 'Winner' }); }
     else {
-      if (next && o && shots[j + 1] === shots[r.shots[r.shots.length - 1]]) {
-        if (o.how === 'error' && o.by === next.slot) add(10, 'Forced the opponent into an error');
-        if (o.how === 'winner' && o.by === next.slot) add(-35, 'Set up the opponent’s winner');
+      if (next && result?.j === j + 1) {
+        if (result.how === 'error') add(10, 'Forced the opponent into an error');
+        if (result.how === 'winner') add(-35, 'Set up the opponent’s winner');
       }
       // --- what the opponent did with it
       if (next && sh.type !== 'Serve') {
@@ -112,6 +136,12 @@ export function computeAccuracy(match, A) {
       const knee = series[sh.slot].knee[sh.i];
       if (sh.zone === 'kitchen' && knee > 168) add(-4, 'Upright at contact');
     }
+    // The final contact can be either a winner or an error. Without a resolved
+    // outcome, do not call it a mistake from motion alone.
+    if (!result && !next && score < 82) {
+      why.push({ d: 82 - score, text: 'Rally result unlabeled — final shot kept neutral' });
+      score = 82;
+    }
     score = Math.max(0, Math.min(100, Math.round(score)));
     return { j, slot: sh.slot, t: sh.t, score, cls: classOf(score).id, why };
   });
@@ -126,5 +156,6 @@ export function computeAccuracy(match, A) {
   });
   const team = {};
   for (const tm of ['A', 'B']) team[tm] = mean(review.filter(x => players[x.slot].team === tm).map(x => x.score));
-  return { review, perPlayer, team, labeled: rallies.some(r => r.outcome?.winner) };
+  const labeledCount = decisive.filter(Boolean).length;
+  return { review, perPlayer, team, labeled: labeledCount > 0, labeledCount, totalRallies: rallies.length };
 }
