@@ -129,9 +129,12 @@ export class Tracker {
     return true;
   }
 
-  update(t, dets) {
+  update(t, allDets) {
     const out = new Array(this.slots.length).fill(null);
-    if (!this.inited && !this.init(t, dets)) return out;
+    // people standing in erased zones (spectators…) never start or re-acquire a player track
+    const fresh = allDets.filter(d => !d.masked);
+    if (!this.inited && !this.init(t, fresh)) return out;
+    const dets = allDets;
     const pairs = [];
     this.slots.forEach((s, si) => {
       if (!s.last) return;
@@ -140,6 +143,8 @@ export class Tracker {
       dets.forEach((d, di) => {
         if (sideOf(d.cy) !== s.side) return;
         const dist = Math.hypot(d.cx - s.last.cx, d.cy - s.last.cy);
+        // an erased-zone detection may only continue a player who was just here (stepped into the zone)
+        if (d.masked && (dt > 0.5 || dist > 4)) return;
         if (dist < maxD) pairs.push({ si, di, dist: this.cost(s, d) });
       });
     });
@@ -155,7 +160,7 @@ export class Tracker {
       if (usedS.has(si) || (s.last && t - s.lastT < 1.5)) return;
       let best = -1, bd = Infinity;
       dets.forEach((d, di) => {
-        if (usedD.has(di) || sideOf(d.cy) !== s.side) return;
+        if (usedD.has(di) || d.masked || sideOf(d.cy) !== s.side) return;
         const c = this.cost(s, d, 0.2) + farPenalty(d); // after a gap, appearance matters more than position
         if (c < bd) { bd = c; best = di; }
       });

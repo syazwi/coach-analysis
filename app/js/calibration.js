@@ -6,6 +6,39 @@ import { FrameDetector } from './detector.js';
 import { colorDist } from './tracking.js';
 import { BallDetector, sampleBallColor, ballConfigFromSamples } from './ball.js';
 import { drawSkeleton, drawCourtOverlay, drawLabel, playerColor, BALL_COLOR } from './render.js';
+import { toGrid, fromGrid, isEmpty, poseMasked, drawMask, attachPainter } from './mask.js';
+
+/**
+ * Play / pause / speed controls for a calibration canvas that mirrors the hidden video element.
+ * While playing, render() is called every animation frame; onPause() runs when playback stops.
+ */
+export function attachPlayback(video, { playBtn, speedSel, scrub, render, onPause }) {
+  let raf = 0;
+  const loop = () => {
+    if (video.paused || video.ended) { stop(); return; }
+    scrub.value = video.currentTime;
+    render();
+    raf = requestAnimationFrame(loop);
+  };
+  const stop = () => {
+    cancelAnimationFrame(raf); raf = 0;
+    playBtn.textContent = '▶';
+    scrub.value = video.currentTime;
+    render();
+    onPause?.();
+  };
+  playBtn.addEventListener('click', async () => {
+    if (video.paused) {
+      video.playbackRate = +speedSel.value || 1;
+      try { await video.play(); } catch { return; }
+      playBtn.textContent = '⏸';
+      raf = requestAnimationFrame(loop);
+    } else video.pause();
+  });
+  video.addEventListener('pause', () => { if (raf) stop(); });
+  speedSel.addEventListener('change', () => { video.playbackRate = +speedSel.value || 1; });
+  return { isPlaying: () => !video.paused, pause: () => video.pause() };
+}
 
 const rgbCss = c => (c ? `rgb(${c.map(Math.round).join(',')})` : 'transparent');
 const hsv2rgb = (h, s, v) => {
@@ -15,7 +48,7 @@ const hsv2rgb = (h, s, v) => {
 
 export function setupCalibration({ video, getDraft, setStep, onReady }) {
   // ================================================================ players
-  const pc = { dets: [], assign: [], hands: [], active: 0, detector: null, busy: false, t: 0, scale: 1 };
+  const pc = { dets: [], assign: [], hands: [], active: 0, detector: null, busy: false, t: 0, scale: 1, tool: 'select', mask: null, hover: null };
   const HANDS = { L: L.lw, R: L.rw };
   const wristPos = (det, side) => [det.lm[HANDS[side] * 3], det.lm[HANDS[side] * 3 + 1], det.lm[HANDS[side] * 3 + 2]];
   const plCanvas = $('#plCanvas');
@@ -51,7 +84,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     players.forEach((p, si) => {
       const pa = prev[si];
       dets.forEach((d, di) => {
-        if (sideOf(d.cy) !== teamSide(p.team)) return;
+        if (d.masked || sideOf(d.cy) !== teamSide(p.team)) return;
         let c;
         if (pa) {
           const cd = colorDist(pa.color, d.color);
@@ -75,7 +108,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   }
 
   async function detectPlayers() {
-    if (pc.busy) return;
+    if (pc.busy || !video.paused) return;
     pc.busy = true;
     const d = getDraft();
     try {
@@ -86,6 +119,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
         pc.detCal = d.cal;
       }
       pc.dets = pc.detector.detect(video);
+      pc.dets.forEach(det => { det.masked = poseMasked(pc.mask, det.lm); });
       pc.t = video.currentTime;
       pc.assign = autoAssign(pc.dets);
       const found = pc.assign.filter(Boolean).length;
@@ -103,8 +137,26 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     const d = getDraft();
     const { ctx, w, h } = drawFrame(plCanvas);
     drawCourtOverlay(ctx, d.cal, w, h);
+    drawMask(ctx, pc.mask, w, h);
+    if (pc.hover && pc.tool !== 'select') {
+      ctx.strokeStyle = pc.tool === 'erase' ? '#e34948' : '#f0efec'; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(pc.hover[0] * w, pc.hover[1] * h, (+$('#plBrush').value / 100) * w, 0, Math.PI * 2); ctx.stroke();
+    }
+    $('#plTime').textContent = fmtTime(video.currentTime);
+    const nErased = pc.dets.filter(x => x.masked).length;
+    $('#plEraseInfo').textContent = isEmpty(pc.mask) ? '' : `${nErased} ${nErased === 1 ? 'person' : 'people'} in erased areas will be ignored.`;
+    if (!video.paused) return; // skeletons belong to the paused frame — redetected on pause
     const assignedDets = new Set(pc.assign.filter(a => a && !a.manual));
-    for (const det of pc.dets) if (!assignedDets.has(det)) drawSkeleton(ctx, det.lm, w, h, 'rgba(200,200,190,0.6)', 2);
+    for (const det of pc.dets) {
+      if (assignedDets.has(det)) continue;
+      if (det.masked) {
+        drawSkeleton(ctx, det.lm, w, h, 'rgba(227,73,72,0.45)', 1.5);
+        const b = bbox(det);
+        ctx.strokeStyle = 'rgba(227,73,72,0.9)'; ctx.lineWidth = 2;
+        const cx = ((b.x0 + b.x1) / 2) * w, cy = b.y0 * h - 8;
+        ctx.beginPath(); ctx.moveTo(cx - 5, cy - 5); ctx.lineTo(cx + 5, cy + 5); ctx.moveTo(cx + 5, cy - 5); ctx.lineTo(cx - 5, cy + 5); ctx.stroke();
+      } else drawSkeleton(ctx, det.lm, w, h, 'rgba(200,200,190,0.6)', 2);
+    }
     pc.assign.forEach((a, si) => {
       if (!a) return;
       const color = playerColor(d.players, si);
@@ -175,6 +227,8 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   });
 
   plCanvas.addEventListener('click', e => {
+    if (pc.tool !== 'select') return; // eraser handles its own strokes
+    if (!video.paused) { video.pause(); toast('Paused — now click a player.'); return; }
     const d = getDraft();
     const r = plCanvas.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
@@ -198,6 +252,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     // hit-test detected skeletons
     let hit = null, best = Infinity;
     for (const det of pc.dets) {
+      if (det.masked) continue; // erased (spectator)
       const b = bbox(det);
       const padX = 0.01, padY = 0.01;
       if (x < b.x0 - padX || x > b.x1 + padX || y < b.y0 - padY || y > b.y1 + padY) continue;
@@ -258,7 +313,41 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     scrubTimer = setTimeout(detectPlayers, 350);
   });
   $('#plDetect').addEventListener('click', detectPlayers);
-  $('#plBack').addEventListener('click', () => setStep(2));
+  $('#plBack').addEventListener('click', () => { video.pause(); setStep(2); });
+
+  // --- play the video during player calibration (skeletons are re-detected when paused)
+  attachPlayback(video, {
+    playBtn: $('#plPlay'), speedSel: $('#plSpeed'), scrub: $('#plScrub'),
+    render: () => { if ($('[data-pane="3"]').classList.contains('active')) renderPlayers(); },
+    onPause: () => { if ($('[data-pane="3"]').classList.contains('active')) { clearTimeout(scrubTimer); scrubTimer = setTimeout(detectPlayers, 200); } },
+  });
+
+  // --- eraser: paint over spectators / benches / other courts so they are never detected
+  const plPainter = attachPainter(plCanvas, {
+    getGrid: () => pc.mask,
+    getBrush: () => +$('#plBrush').value / 100,
+    isRestore: () => pc.tool === 'restore',
+    aspect: () => video.videoWidth / video.videoHeight,
+    onHover: p => { pc.hover = p; requestAnimationFrame(renderPlayers); },
+    onChange: () => {
+      pc.dets.forEach(det => { det.masked = poseMasked(pc.mask, det.lm); });
+      // a player standing in a freshly erased area is unassigned
+      pc.assign = pc.assign.map(a => (a && !a.manual && a.masked ? null : a));
+      requestAnimationFrame(renderPlayers);
+    },
+  });
+  document.querySelectorAll('[data-pltool]').forEach(b => b.addEventListener('click', () => {
+    pc.tool = b.dataset.pltool;
+    document.querySelectorAll('[data-pltool]').forEach(x => x.classList.toggle('on', x === b));
+    plPainter.setMode(pc.tool !== 'select');
+    if (pc.tool !== 'select') video.pause();
+    renderPlayers();
+  }));
+  $('#plEraseClear').addEventListener('click', () => {
+    pc.mask.g.fill(0);
+    pc.dets.forEach(det => { det.masked = false; });
+    renderPlayers();
+  });
 
   $('#plConfirm').addEventListener('click', () => {
     const d = getDraft();
@@ -271,13 +360,17 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     });
     d.players.forEach((p, si) => { p.hand = pc.hands[si] || null; }); // null = detect from swings
     d.cfg.playArea = UNLIMITED; // players are followed wherever they move
+    d.cfg.ignore = isEmpty(pc.mask) ? null : fromGrid(pc.mask); // eraser zones
+    video.pause();
     if (d.cfg.ball) startBall(); else onReady();
   });
 
   async function startPlayers() {
+    video.pause();
     const d = getDraft();
     pc.assign = d.players.map(() => null);
     pc.hands = d.players.map(p => p.hand || null);
+    pc.mask = toGrid(d.cfg.ignore);
     pc.dets = [];
     const s = $('#plScrub');
     s.max = video.duration;
@@ -358,6 +451,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   ballCanvas.addEventListener('mousemove', e => { bc.hover = ballPos(e); renderBall(); });
   ballCanvas.addEventListener('mouseleave', () => { bc.hover = null; renderBall(); });
   ballCanvas.addEventListener('click', e => {
+    if (!video.paused) { video.pause(); toast('Paused — now click the ball.'); return; }
     const [x, y] = ballPos(e);
     const d = +sizeEl.value;
     const size = Math.max(5, Math.round(d + 4));
@@ -401,7 +495,13 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
       : res.blobs.length ? `${res.blobs.length} candidates (grey) but none chosen — add another sample or adjust size.` : 'No ball found on this frame. The ball must be moving; try another frame, add a sample here, or adjust the size.';
     renderBall();
   });
-  $('#ballBack').addEventListener('click', () => setStep(3));
+  $('#ballBack').addEventListener('click', () => { video.pause(); setStep(3); });
+
+  // --- play the video to find a moment where the ball is visible, then pause and click it
+  attachPlayback(video, {
+    playBtn: $('#ballPlay'), speedSel: $('#ballSpeed'), scrub: $('#ballScrub'),
+    render: () => { if ($('[data-pane="4"]').classList.contains('active')) renderBall(); },
+  });
   $('#ballSkip').addEventListener('click', () => { getDraft().cfg.ball = false; getDraft().cfg.ballCal = null; onReady(); });
   $('#ballConfirm').addEventListener('click', () => {
     const d = getDraft();
@@ -410,6 +510,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   });
 
   async function startBall() {
+    video.pause();
     const d = getDraft();
     bc.samples = []; bc.test = null; bc.full = null;
     // default ball size: ~2.9 in ball at the far kitchen line, from the court scale in the image

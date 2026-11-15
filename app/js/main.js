@@ -10,7 +10,8 @@ import { drawSkeleton, drawPaddleHand, drawCourtOverlay, drawLabel, drawTopDown,
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
 import { importFromLink } from './importer.js';
-import { setupCalibration } from './calibration.js';
+import { setupCalibration, attachPlayback } from './calibration.js';
+import { toGrid, fromGrid, isEmpty, poseMasked, maskedAt, drawMask, attachPainter } from './mask.js';
 import { computeAccuracy, CLASSES, PHASES } from './accuracy.js';
 import { setupTrim } from './trim.js';
 
@@ -235,6 +236,10 @@ window.addEventListener('mousemove', e => {
 });
 window.addEventListener('mouseup', () => { state.dragIdx = -1; });
 $('#calReset').addEventListener('click', () => { state.calPts = []; drawCal(); });
+attachPlayback(procVideo, {
+  playBtn: $('#calPlay'), speedSel: $('#calSpeed'), scrub: $('#calScrub'),
+  render: () => { if ($('[data-pane="2"]').classList.contains('active')) { drawCal(); $('#calTime').textContent = fmtTime(procVideo.currentTime); } },
+});
 $('#calScrub').addEventListener('input', async e => {
   $('#calTime').textContent = fmtTime(+e.target.value);
   await seekVideo(procVideo, +e.target.value);
@@ -254,7 +259,7 @@ const calib = setupCalibration({
   video: procVideo,
   getDraft: () => state.draft,
   setStep,
-  onReady: async () => { calib.dispose(); await runProcessing(); },
+  onReady: async () => { procVideo.pause(); calib.dispose(); await runProcessing(); },
 });
 
 // ------------------------------------------------------------------ step 3: processing
@@ -330,6 +335,8 @@ function recompute() {
 }
 
 async function openMatch(match, isNew = false) {
+  if (state.erase?.on) closeEraser();
+  if (state.erase) state.erase.undo = [];
   state.match = match;
   state.selected = null; state.playlist = null; state.shot = null;
   recompute();
@@ -381,6 +388,94 @@ $('#reimportBtn').addEventListener('click', () => {
     },
     statusEl: $('#attachNote'), progEl: prog, button: $('#reimportBtn'),
   });
+});
+
+// ------------------------------------------------------------------ eraser (remove spectators after analysis)
+state.erase = { on: false, grid: null, tool: 'erase', hover: null, undo: [] };
+const overlayCanvas = $('#overlay');
+const erasePainter = attachPainter(overlayCanvas, {
+  getGrid: () => state.erase.grid,
+  getBrush: () => +$('#eBrush').value / 100,
+  isRestore: () => state.erase.tool === 'restore',
+  aspect: () => state.match.video.w / state.match.video.h,
+  onHover: p => { state.erase.hover = p; drawOverlayNow(true); },
+  onChange: () => drawOverlayNow(true),
+});
+
+function openEraser() {
+  if (!state.match) return;
+  video.pause(); stopPlaylist();
+  state.erase.on = true;
+  state.erase.grid = toGrid(state.match.cfg.ignore);
+  overlayCanvas.classList.add('painting');
+  erasePainter.setMode(true);
+  $('#eraseBar').hidden = false;
+  $('#eUndo').disabled = !state.erase.undo.length;
+  $('#eInfo').textContent = 'Paint over spectators on the video (pause on a frame where they are visible). Removing applies to the whole match.';
+  drawOverlayNow(true);
+}
+function closeEraser() {
+  state.erase.on = false;
+  overlayCanvas.classList.remove('painting');
+  erasePainter.setMode(false);
+  $('#eraseBar').hidden = true;
+  drawOverlayNow(true);
+}
+$('#btnErase').addEventListener('click', () => (state.erase.on ? closeEraser() : openEraser()));
+$('#eDone').addEventListener('click', closeEraser);
+document.querySelectorAll('[data-etool]').forEach(b => b.addEventListener('click', () => {
+  state.erase.tool = b.dataset.etool;
+  document.querySelectorAll('[data-etool]').forEach(x => x.classList.toggle('on', x === b));
+}));
+
+$('#eApply').addEventListener('click', () => {
+  const { match } = state, grid = state.erase.grid;
+  if (isEmpty(grid)) { toast('Paint over the spectators first.'); return; }
+  const removed = [];
+  const perPlayer = match.players.map(() => 0);
+  match.samples.forEach((s, i) => {
+    s.p.forEach((p, k) => {
+      if (p && poseMasked(grid, p.lm)) { removed.push({ i, k, p }); s.p[k] = null; perPlayer[k]++; }
+    });
+    if (s.b && maskedAt(grid, s.b[0], s.b[1])) { removed.push({ i, ball: s.b }); s.b = null; }
+  });
+  state.erase.undo.push({ removed, prevIgnore: match.cfg.ignore || null });
+  match.cfg.ignore = fromGrid(grid);
+  recompute(); renderAnalysis(); persist();
+  $('#eUndo').disabled = false;
+  const fps = match.cfg.fps || 10;
+  const detail = match.players.map((p, k) => (perPlayer[k] ? `${p.label} ${fmtTime(perPlayer[k] / fps)}` : '')).filter(Boolean).join(', ');
+  $('#eInfo').textContent = removed.length
+    ? `Removed ${removed.length} detections (${detail || 'ball only'}). If a real player was lost while a spectator was tracked, use “Re-analyze with erased areas”.`
+    : 'Nothing was detected in the erased areas. The areas are saved and will be ignored if you re-analyze.';
+  toast(removed.length ? 'Spectator detections removed.' : 'Erased areas saved.');
+});
+
+$('#eUndo').addEventListener('click', () => {
+  const last = state.erase.undo.pop();
+  if (!last) return;
+  const { match } = state;
+  for (const r of last.removed) {
+    if (r.ball) match.samples[r.i].b = r.ball; else match.samples[r.i].p[r.k] = r.p;
+  }
+  match.cfg.ignore = last.prevIgnore;
+  state.erase.grid = toGrid(last.prevIgnore);
+  recompute(); renderAnalysis(); persist();
+  $('#eUndo').disabled = !state.erase.undo.length;
+  toast(`Restored ${last.removed.length} detections.`);
+});
+
+$('#eReanalyze').addEventListener('click', async () => {
+  if (!videoReady()) return;
+  if (!confirm('Run the whole analysis again with the erased areas ignored from the start? Calibration, names, hands and labeled rallies are kept.')) return;
+  const m = state.match;
+  m.cfg.ignore = isEmpty(state.erase.grid) ? null : fromGrid(state.erase.grid);
+  closeEraser();
+  if (procVideo.src !== state.fileURL) await loadVideoMeta(procVideo, state.fileURL);
+  state.draft = { ...m, samples: undefined };
+  state.erase.undo = [];
+  show('new');
+  await runProcessing();
 });
 
 // ------------------------------------------------------------------ analysis view
@@ -806,6 +901,11 @@ function drawOverlayNow(force = false) {
   ctx.clearRect(0, 0, w, h);
   if (!video.src) { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, w, h); }
   drawOverlayLayer(ctx, w, h, t);
+  if (state.erase.on) {
+    drawMask(ctx, state.erase.grid, w, h);
+    const hv = state.erase.hover;
+    if (hv) { ctx.strokeStyle = state.erase.tool === 'erase' ? '#e34948' : '#f0efec'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(hv[0] * w, hv[1] * h, (+document.getElementById('eBrush').value / 100) * w, 0, Math.PI * 2); ctx.stroke(); }
+  }
   $('#timeLabel').textContent = `${fmtTime(t)} / ${fmtTime(video.duration || state.match.video.duration)}`;
   drawTimelineNow(t);
   drawTopDownNow(t);

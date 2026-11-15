@@ -3,6 +3,7 @@ import { Tracker } from './tracking.js';
 import { BallDetector } from './ball.js';
 import { seekVideo } from './util.js';
 import { areaOf, CROP_MAX } from './court.js';
+import { toGrid } from './mask.js';
 
 /**
  * Walks the video at cfg.fps, runs pose estimation (optionally on two crops),
@@ -15,9 +16,12 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
   onStatus?.('Loading pose model (first run downloads ~5–30 MB)…');
   const area = areaOf(cfg);
   const detector = await FrameDetector.create({ model: cfg.model, crops: cfg.crops, nPlayers: players.length, cal, vw, vh, mode: 'VIDEO', area });
+  const ignore = cfg.ignore?.cells?.length ? toGrid(cfg.ignore) : null; // eraser zones
+  detector.setMask(ignore);
 
   const tracker = new Tracker(players);
   const ball = cfg.ball ? new BallDetector(vw, vh, cal, cfg.ballCal || null, CROP_MAX) : null;
+  if (ball) ball.mask = ignore;
   // game segments chosen in "Game time" (older analyses: a single start/end range)
   const segments = (cfg.segments?.length ? cfg.segments : [{ start: cfg.rangeStart || 0, end: cfg.rangeEnd || video.duration }])
     .map(g => ({ start: Math.max(0, g.start), end: Math.min(video.duration, g.end || video.duration) }))

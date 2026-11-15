@@ -108,6 +108,28 @@ try {
   check('standard area drops far-out players', filterDetections(outsideDets, courtMod.AREA_PRESETS.standard).length === 1);
   check('wide area keeps players outside the lines', filterDetections(outsideDets, courtMod.AREA_PRESETS.xwide).length === 3);
   check('default (no limit) keeps everyone on the ground', filterDetections([...outsideDets, fake(40, 90)]).length === 4);
+  // ---- eraser (ignore zones)
+  const maskMod = await import('../js/mask.js');
+  const grid = maskMod.toGrid(maskMod.emptyMask());
+  maskMod.paint(grid, 0.9, 0.5, 0.05, 1, 16 / 9);               // erase a spot on the right edge (spectators)
+  const spectator = new Float32Array(99), player = new Float32Array(99);
+  for (const [lm, x] of [[spectator, 0.9], [player, 0.5]]) {
+    for (const j of [23, 24]) { lm[j * 3] = x; lm[j * 3 + 1] = 0.45; lm[j * 3 + 2] = 0.9; }
+    for (const j of [27, 28]) { lm[j * 3] = x; lm[j * 3 + 1] = 0.52; lm[j * 3 + 2] = 0.9; }
+  }
+  check('eraser hides people in erased area only', maskMod.poseMasked(grid, spectator) && !maskMod.poseMasked(grid, player));
+  const round = maskMod.toGrid(maskMod.fromGrid(grid));
+  check('erased areas save/restore', round.g.every((v, i) => v === grid.g[i]) && maskMod.fromGrid(grid).cells.length > 0, `${maskMod.fromGrid(grid).cells.length} cells`);
+  const { Tracker: TrackerE } = await import('../js/tracking.js');
+  const trE = new TrackerE([{ team: 'A', label: 'P' }]);
+  const outE = trE.update(0, [{ cx: 10, cy: 40, masked: true }]);
+  const outE2 = trE.update(5, [{ cx: 10, cy: 40, masked: true }, { cx: 12, cy: 35 }]);
+  check('tracker never starts a player on an erased spectator', outE[0] === null && outE2[0]?.cx === 12);
+  const trF = new TrackerE([{ team: 'A', label: 'P' }]);
+  trF.update(10, [{ cx: 10, cy: 40 }]);
+  const stepIn = trF.update(10.1, [{ cx: 10.5, cy: 40.5, masked: true }]);
+  check('tracked player stepping into an erased area is kept', stepIn[0]?.cx === 10.5);
+
   const { thoroughRegions } = await import('../js/detector.js');
   const tiles = thoroughRegions(cal, 1920, 1080);
   const farTiles = tiles.slice(0, 2);

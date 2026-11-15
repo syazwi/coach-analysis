@@ -105,6 +105,7 @@ export class BallDetector {
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const i = y * w + x, j = i * 4;
+        if (this.mask && this.mask.g[Math.floor((y / h) * this.mask.h) * this.mask.w + Math.floor((x / w) * this.mask.w)]) continue; // erased zone
         const r = data[j], g = data[j + 1], b = data[j + 2];
         const diff = Math.abs(r - prev[j]) + Math.abs(g - prev[j + 1]) + Math.abs(b - prev[j + 2]);
         if (diff > 50 && this.isBall(r, g, b)) mask[i] = 1;

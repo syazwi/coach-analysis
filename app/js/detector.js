@@ -4,6 +4,7 @@
 import { createLandmarker } from './pose.js';
 import { cropRegions, imgBox, UNLIMITED, CROP_MAX } from './court.js';
 import { toDetection, filterDetections, torsoColor } from './tracking.js';
+import { poseMasked } from './mask.js';
 
 /** Extra regions for calibration: far half split into overlapping left/right tiles, plus the whole frame. */
 export function thoroughRegions(cal, vw, vh) {
@@ -62,6 +63,8 @@ export class FrameDetector {
       for (const pose of res.landmarks || []) dets.push(toDetection(pose, r, this.vw, this.vh, this.cal));
     });
     const kept = filterDetections(dets, this.area, this.thorough ? 0.2 : 0.3);
+    // eraser zones: mark (not drop) — a tracked player may briefly step into one
+    if (this.mask) for (const d of kept) d.masked = poseMasked(this.mask, d.lm);
     if (kept.length) {
       const data = this.frameData(video);
       for (const d of kept) d.color = torsoColor(data, this.app.width, this.app.height, d.lm);
@@ -75,6 +78,9 @@ export class FrameDetector {
     appCtx.drawImage(video, 0, 0, app.width, app.height);
     return appCtx.getImageData(0, 0, app.width, app.height).data;
   }
+
+  /** Eraser grid from mask.js (or null). */
+  setMask(grid) { this.mask = grid; }
 
   close() { this.landmarkers.forEach(l => l.close?.()); }
 }
