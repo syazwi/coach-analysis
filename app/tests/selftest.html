@@ -100,6 +100,51 @@ try {
   const json = matchToJSON(match);
   const back2 = matchFromJSON(json);
   check('json round-trip', back2.samples[5].p[0].lm instanceof Float32Array && back2.samples.length === samples.length, `${(json.length / 1e6).toFixed(1)} MB`);
+  // ---- player calibration: partners in different shirts cross paths; identities must survive
+  const { Tracker } = await import('../js/tracking.js');
+  const RED = [200, 40, 40], BLUE = [40, 60, 200];
+  const tr = new Tracker([
+    { team: 'A', label: 'Red', color: RED, seed: { cx: 5, cy: 30 } },
+    { team: 'A', label: 'Blue', color: BLUE, seed: { cx: 15, cy: 30 } },
+  ]);
+  let swapped = false;
+  for (let i = 0; i <= 30; i++) {
+    const t = i / 10, f = i / 30;
+    const red = { cx: 5 + 10 * f, cy: 30, color: RED }, blue = { cx: 15 - 10 * f, cy: 30.5, color: BLUE };
+    const dets = i % 2 ? [red, blue] : [blue, red];
+    const out = tr.update(t, i === 15 ? [blue] : dets); // red hidden at the crossing point
+    if (out[0] && out[0].color !== RED) swapped = true;
+    if (out[1] && out[1].color !== BLUE) swapped = true;
+  }
+  check('calibrated tracker keeps identities when partners cross', !swapped);
+  const tr2 = new Tracker([{ team: 'A', label: 'x', seed: { cx: 15, cy: 30 }, color: RED }, { team: 'A', label: 'y', seed: { cx: 5, cy: 30 }, color: BLUE }]);
+  const o2 = tr2.update(0, [{ cx: 5, cy: 30, color: BLUE }, { cx: 15, cy: 30, color: RED }]);
+  check('seeded init assigns by calibration', o2[0]?.color === RED && o2[1]?.color === BLUE);
+
+  // ---- ball calibration on synthetic frames
+  const { BallDetector, sampleBallColor, ballConfigFromSamples } = await import('../js/ball.js');
+  const W = 1280, H = 720;
+  const frame = (bx, by) => {
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    g.fillStyle = '#2e5e8a'; g.fillRect(0, 0, W, H);                 // blue court
+    g.fillStyle = '#e8e23a'; g.fillRect(600, 400, 40, 40);            // static yellow sign (not moving)
+    g.fillStyle = '#e8e23a'; g.fillRect(200 + bx / 4, 450, 60, 90);   // moving yellow shirt (too big)
+    g.fillStyle = '#d9f23d'; g.beginPath(); g.arc(bx, by, 6, 0, 7); g.fill(); // ball, 12 px
+    return c;
+  };
+  const f1 = frame(500, 300), f2 = frame(540, 290);
+  const patch = f2.getContext('2d').getImageData(540 - 8, 290 - 8, 16, 16).data;
+  const col = sampleBallColor(patch, 16, 6);
+  check('ball colour sampled', col && col.s > 0.5, col ? `hue ${col.h.toFixed(0)}°, s ${col.s.toFixed(2)}` : 'none');
+  const bcfg = ballConfigFromSamples([{ ...col, d: 12 }]);
+  const calB = makeCalibration([[0.2, 0.1], [0.8, 0.1], [0.95, 0.95], [0.05, 0.95]]);
+  const bd = new BallDetector(W, H, calB, bcfg);
+  bd.detect(f1, 0);
+  const res = bd.detect(f2, 0.1, true);
+  const okPos = res.pick && Math.abs(res.pick[0] * W - 540) < 4 && Math.abs(res.pick[1] * H - 290) < 4;
+  check('calibrated ball detector finds ball, ignores sign & shirt', okPos && res.blobs.length === 1, res.pick ? `(${(res.pick[0] * W).toFixed(0)}, ${(res.pick[1] * H).toFixed(0)}), ${res.blobs.length} blob(s)` : `none, ${res.blobs.length} blobs`);
+
   log.push('', 'SUMMARY: ' + C.summary.replace(/<[^>]+>/g, ''));
   // store for the UI smoke test (open index.html#open=selftest)
   if (location.search.includes('store')) {

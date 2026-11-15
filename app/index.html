@@ -56,7 +56,9 @@
     <ol class="steps" id="steps">
       <li data-step="1" class="active">Video & setup</li>
       <li data-step="2">Court calibration</li>
-      <li data-step="3">Processing</li>
+      <li data-step="3">Player calibration</li>
+      <li data-step="4">Ball calibration</li>
+      <li data-step="5">Processing</li>
     </ol>
 
     <div class="step-pane active" data-pane="1">
@@ -131,7 +133,7 @@
           <h2>Click the 4 court corners</h2>
           <div class="actions">
             <button class="btn ghost" id="calReset">Reset points</button>
-            <button class="btn primary" id="calConfirm" disabled>Start analysis →</button>
+            <button class="btn primary" id="calConfirm" disabled>Next: players →</button>
           </div>
         </div>
         <p class="muted" id="calHint">Click in order: <b>1 far-left</b>, <b>2 far-right</b>, <b>3 near-right</b>, <b>4 near-left</b> (outer baseline/sideline corners). Drag points to adjust.</p>
@@ -141,6 +143,54 @@
     </div>
 
     <div class="step-pane" data-pane="3">
+      <div class="card">
+        <div class="row-head small">
+          <h2>Identify the players</h2>
+          <div class="actions">
+            <button class="btn ghost" id="plBack">← Court</button>
+            <button class="btn ghost" id="plDetect">Re-detect on this frame</button>
+            <button class="btn primary" id="plConfirm">Next: ball →</button>
+          </div>
+        </div>
+        <p class="muted" id="plHint">Pick a frame where all players are visible and standing apart (ideally near the start of the analysis range). Select a player on the right, then click their skeleton.</p>
+        <div class="calib-grid">
+          <div class="cal-wrap"><canvas id="plCanvas"></canvas></div>
+          <div>
+            <div id="plSlots" class="slot-list"></div>
+            <p class="muted small">The shirt colour sampled here is used to keep each player's identity when partners cross or someone is briefly hidden. If a player isn't detected, click on their <b>feet</b> to place them manually.</p>
+          </div>
+        </div>
+        <label class="scrub">Frame <input type="range" id="plScrub" min="0" max="100" step="0.1" value="0"> <span id="plTime">0:00</span></label>
+      </div>
+    </div>
+
+    <div class="step-pane" data-pane="4">
+      <div class="card">
+        <div class="row-head small">
+          <h2>Calibrate the ball</h2>
+          <div class="actions">
+            <button class="btn ghost" id="ballBack">← Players</button>
+            <button class="btn ghost" id="ballTest">Test detection on this frame</button>
+            <button class="btn ghost" id="ballSkip">Skip ball tracking</button>
+            <button class="btn primary" id="ballConfirm" disabled>Start analysis →</button>
+          </div>
+        </div>
+        <p class="muted" id="ballHint">Scrub to a frame where the ball is clearly visible and click its centre. Set the size so the ring matches the ball. Add 2–3 samples from different spots (sun / shade, near / far) for best results.</p>
+        <div class="calib-grid">
+          <div class="cal-wrap"><canvas id="ballCanvas"></canvas></div>
+          <div>
+            <label class="scrub">Ball size <input type="range" id="ballSize" min="3" max="48" step="1" value="10"> <span id="ballSizeVal" class="mono">10 px</span></label>
+            <canvas id="ballZoom" width="168" height="168" class="zoom"></canvas>
+            <div id="ballSamples" class="sample-list"></div>
+            <div id="ballTestResult" class="muted small"></div>
+          </div>
+        </div>
+        <label class="scrub">Frame <input type="range" id="ballScrub" min="0" max="100" step="0.04" value="0"> <span id="ballTime">0:00</span>
+          <button type="button" class="btn small ghost" id="ballPrev">◀ frame</button><button type="button" class="btn small ghost" id="ballNext">frame ▶</button></label>
+      </div>
+    </div>
+
+    <div class="step-pane" data-pane="5">
       <div class="card">
         <div class="row-head small">
           <h2>Analyzing…</h2>

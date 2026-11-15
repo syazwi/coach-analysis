@@ -9,6 +9,7 @@ import { drawSkeleton, drawCourtOverlay, drawLabel, drawTopDown, drawHeatmap, dr
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
 import { importFromLink } from './importer.js';
+import { setupCalibration } from './calibration.js';
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -231,8 +232,15 @@ $('#calConfirm').addEventListener('click', async () => {
   try { cal = makeCalibration(state.calPts); } catch { toast('Those points do not form a court — reset and try again.'); return; }
   state.draft.cal = cal;
   state.draft.video = { name: state.file.name, size: state.file.size, duration: procVideo.duration, w: procVideo.videoWidth, h: procVideo.videoHeight, sourceUrl: state.sourceUrl || null };
-  setStep(3);
-  await runProcessing();
+  await calib.startPlayers();
+});
+
+// ------------------------------------------------------------------ steps 3–4: player & ball calibration
+const calib = setupCalibration({
+  video: procVideo,
+  getDraft: () => state.draft,
+  setStep,
+  onReady: async () => { calib.dispose(); await runProcessing(); },
 });
 
 // ------------------------------------------------------------------ step 3: processing
@@ -241,6 +249,7 @@ $('#cancelProc').addEventListener('click', () => { state.cancel = true; });
 async function runProcessing() {
   const match = state.draft;
   state.cancel = false;
+  setStep(5);
   const pc = $('#procCanvas');
   const scale = Math.min(1, 960 / procVideo.videoWidth);
   pc.width = Math.round(procVideo.videoWidth * scale);
@@ -263,7 +272,7 @@ async function runProcessing() {
       },
       isCancelled: () => state.cancel,
     });
-    if (samples.length < 20) { toast('Not enough frames were analyzed.'); setStep(2); return; }
+    if (samples.length < 20) { toast('Not enough frames were analyzed.'); setStep(3); return; }
     match.samples = samples;
     if (state.cancel) toast('Stopped early — analyzing the part that was processed.');
     await openMatch(match, true);
@@ -788,7 +797,25 @@ $('#btnSettings').addEventListener('click', () => {
     <h3>Players <span class="muted small">(name · “me”)</span></h3>
     ${P.map((p, k) => `<div class="player-edit-row"><i style="background:${playerColor(P, k)}"></i>
       <input name="label${k}" value="${esc(p.label)}"> <label class="check"><input type="radio" name="me" value="${k}" ${p.isMe ? 'checked' : ''}> me</label></div>`).join('')}
-    <button type="button" class="btn small ghost" id="swapBtn">Swap names within each team</button>`;
+    <button type="button" class="btn small ghost" id="swapBtn">Swap names within each team</button>
+    <h3>Fix an identity switch <span class="muted small">(tracker swapped two players)</span></h3>
+    <p class="muted small">Pause the video at the moment the labels jumped to the wrong person, then swap from that time onward.</p>
+    <div class="actions">${['A', 'B'].map(tm => {
+      const ks = P.map((p, k) => (p.team === tm ? k : -1)).filter(k => k >= 0);
+      return ks.length === 2 ? `<button type="button" class="btn small ghost" data-swapfrom="${ks.join(',')}">Swap ${esc(P[ks[0]].label)} ↔ ${esc(P[ks[1]].label)} from ${fmtTime(video.currentTime || 0)}</button>` : '';
+    }).join('')}</div>
+    ${match.cfg.ballCal ? `<p class="muted small">Ball calibration: hue ${match.cfg.ballCal.h.toFixed(0)}° ± ${match.cfg.ballCal.tolH.toFixed(0)}°, ${match.cfg.ballCal.d.toFixed(0)} px, ${match.cfg.ballCal.n} sample(s).</p>` : ''}`;
+  $$('[data-swapfrom]').forEach(b => {
+    b.onclick = () => {
+      const [a, c] = b.dataset.swapfrom.split(',').map(Number);
+      const t0 = video.currentTime || 0;
+      let n = 0;
+      for (const s of match.samples) if (s.t >= t0) { [s.p[a], s.p[c]] = [s.p[c], s.p[a]]; n++; }
+      recompute(); renderAnalysis(); persist();
+      toast(`Swapped ${P[a].label} ↔ ${P[c].label} for ${n} frames from ${fmtTime(t0)}.`);
+      $('#settingsDlg').close('cancel');
+    };
+  });
   const form = $('#settingsForm');
   form.sensitivity.value = match.cfg.sensitivity ?? 3.5;
   $('#sensVal').textContent = form.sensitivity.value;

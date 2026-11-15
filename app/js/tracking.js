@@ -29,18 +29,83 @@ export function filterDetections(dets) {
   return kept;
 }
 
+/** Mean shirt colour [r,g,b] from the torso quad (shoulders -> hips). data = RGBA of a W×H frame. */
+export function torsoColor(data, W, H, lm) {
+  const P = i => [lm[i * 3], lm[i * 3 + 1], lm[i * 3 + 2]];
+  const ls = P(L.ls), rs = P(L.rs), lh = P(L.lh), rh = P(L.rh);
+  if (Math.min(ls[2], rs[2], lh[2], rh[2]) < 0.4) return null;
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let ui = 0; ui < 5; ui++) {
+    const u = 0.25 + ui * 0.125;
+    for (let vi = 0; vi < 5; vi++) {
+      const v = 0.15 + vi * 0.15;
+      const tx = ls[0] + (rs[0] - ls[0]) * u, ty = ls[1] + (rs[1] - ls[1]) * u;
+      const bx = lh[0] + (rh[0] - lh[0]) * u, by = lh[1] + (rh[1] - lh[1]) * u;
+      const x = Math.round((tx + (bx - tx) * v) * W), y = Math.round((ty + (by - ty) * v) * H);
+      if (x < 0 || y < 0 || x >= W || y >= H) continue;
+      const j = (y * W + x) * 4;
+      r += data[j]; g += data[j + 1]; b += data[j + 2]; n++;
+    }
+  }
+  return n >= 8 ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : null;
+}
+
+/** 0 (same colour) .. 1 (opposite); null when unknown. */
+export function colorDist(a, b) {
+  if (!a || !b) return null;
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) / 441.7;
+}
+
+const COLOR_W = 25; // feet of position error equivalent to a full colour mismatch
+
 /**
  * Keeps stable player identities. Team A = near side, team B = far side.
  * Players are assumed to stay on their side (trim the video if teams change ends).
+ * When players were calibrated (seed position + shirt colour), those drive the first
+ * assignment and help re-identify players after occlusions or when partners cross.
  */
 export class Tracker {
   constructor(players) {
-    this.slots = players.map(p => ({ team: p.team, side: p.team === 'A' ? 'near' : 'far', last: null, lastT: -1e9 }));
+    this.slots = players.map(p => ({
+      team: p.team, side: p.team === 'A' ? 'near' : 'far', last: null, lastT: -1e9,
+      ref: p.color || null, color: p.color || null, seed: p.seed || null,
+    }));
+    this.seeded = this.slots.some(s => s.ref || s.seed);
     this.inited = false;
     this.firstT = null;
   }
 
+  cost(s, d, posW = 1) {
+    const pos = s.last ? Math.hypot(d.cx - s.last.cx, d.cy - s.last.cy) : s.seed ? Math.hypot(d.cx - s.seed.cx, d.cy - s.seed.cy) : 0;
+    const cd = colorDist(s.ref || s.color, d.color);
+    return posW * pos + (cd === null ? COLOR_W * 0.25 : COLOR_W * cd);
+  }
+
+  initSeeded(t, dets) {
+    this.firstT ??= t;
+    const pairs = [];
+    this.slots.forEach((s, si) => dets.forEach((d, di) => {
+      if (sideOf(d.cy) === s.side) pairs.push({ si, di, c: this.cost(s, d, 0.3) });
+    }));
+    pairs.sort((a, b) => a.c - b.c);
+    const usedS = new Set(), usedD = new Set();
+    for (const p of pairs) {
+      if (usedS.has(p.si) || usedD.has(p.di)) continue;
+      usedS.add(p.si); usedD.add(p.di);
+    }
+    if (usedS.size < this.slots.length && t - this.firstT < 3) return false;
+    usedS.clear(); usedD.clear();
+    for (const p of pairs) {
+      if (usedS.has(p.si) || usedD.has(p.di)) continue;
+      usedS.add(p.si); usedD.add(p.di);
+      this.slots[p.si].last = dets[p.di]; this.slots[p.si].lastT = t;
+    }
+    this.inited = true;
+    return true;
+  }
+
   init(t, dets) {
+    if (this.seeded) return this.initSeeded(t, dets);
     this.firstT ??= t;
     const bySide = side => dets.filter(d => sideOf(d.cy) === side).sort((a, b) => a.cx - b.cx);
     const need = side => this.slots.filter(s => s.side === side).length;
@@ -69,7 +134,7 @@ export class Tracker {
       dets.forEach((d, di) => {
         if (sideOf(d.cy) !== s.side) return;
         const dist = Math.hypot(d.cx - s.last.cx, d.cy - s.last.cy);
-        if (dist < maxD) pairs.push({ si, di, dist });
+        if (dist < maxD) pairs.push({ si, di, dist: this.cost(s, d) });
       });
     });
     pairs.sort((a, b) => a.dist - b.dist);
@@ -85,12 +150,17 @@ export class Tracker {
       let best = -1, bd = Infinity;
       dets.forEach((d, di) => {
         if (usedD.has(di) || sideOf(d.cy) !== s.side) return;
-        const dist = s.last ? Math.hypot(d.cx - s.last.cx, d.cy - s.last.cy) : 0;
-        if (dist < bd) { bd = dist; best = di; }
+        const c = this.cost(s, d, 0.2); // after a gap, appearance matters more than position
+        if (c < bd) { bd = c; best = di; }
       });
       if (best >= 0) { usedS.add(si); usedD.add(best); out[si] = dets[best]; }
     });
-    out.forEach((d, si) => { if (d) { this.slots[si].last = d; this.slots[si].lastT = t; } });
+    out.forEach((d, si) => {
+      if (!d) return;
+      const s = this.slots[si];
+      s.last = d; s.lastT = t;
+      if (d.color && !s.ref) s.color = s.color ? s.color.map((v, i) => v * 0.9 + d.color[i] * 0.1) : d.color;
+    });
     return out;
   }
 }

@@ -21,15 +21,18 @@ You need an internet connection the first time, because the MediaPipe pose model
 ## How to use
 
 1. **New analysis**: drop a video, **or paste a link** (YouTube, Vimeo or a direct .mp4) and click *Import*. Then set the format (singles/doubles), skill level and which side your team is on. Optionally trim the start and end. Keep teams on the same ends; if they switch sides, analyze each part separately.
-2. **Calibrate**: click the 4 outer court corners (far-left, far-right, near-right, near-left), then check that the projected lines sit on the real court lines.
-3. **Processing**: pose estimation runs frame by frame, with a live preview. Expect roughly 1–3× the video length at 10 fps on a laptop.
-4. **Match analysis**:
+2. **Court calibration**: click the 4 outer court corners (far-left, far-right, near-right, near-left), then check that the projected lines sit on the real court lines.
+3. **Player calibration**: on a frame where everyone is visible, the app detects the players and suggests who is who. Select each name and click the right skeleton, or click a player's feet if they weren't detected. Each player's starting position and **shirt color** are saved. The tracker uses them so labels stay on the right person when partners cross or someone is briefly hidden.
+4. **Ball calibration**: click the ball on 1–3 frames (sun and shade, near and far) and set the ring to the ball's size. The magnifier helps you click precisely. **Test detection** shows what the detector finds on the current frame. Detection then uses your ball's color and size instead of a generic yellow/green guess. You can also skip ball tracking.
+5. **Processing**: pose estimation runs frame by frame, with a live preview. Expect roughly 1–3× the video length at 10 fps on a laptop.
+6. **Match analysis**:
    - Video with skeleton, ball, court and label overlays
    - Rally/shot timeline
    - Coach panel with findings and clip playlists
    - Live top-down court view, heatmaps, shot inspector (joint angles at contact) and stats tabs
-5. **Label rally outcomes** (in the *Rallies & outcomes* tab). This unlocks error analysis and ranks findings by points lost.
-6. **Report** (printable, can be saved as PDF), **Training plan** (7 days, built from your top findings), **Compare** (progress between matches), **Drills** library, a **Highlights** playlist, and **Export reel** (.webm).
+   If the labels ever jump to the wrong person, pause at that moment and use *Players & settings → Fix an identity switch*.
+7. **Label rally outcomes** (in the *Rallies & outcomes* tab). This unlocks error analysis and ranks findings by points lost.
+8. **Report** (printable, can be saved as PDF), **Training plan** (7 days, built from your top findings), **Compare** (progress between matches), **Drills** library, a **Highlights** playlist, and **Export reel** (.webm).
 
 Analyses are saved in the browser (IndexedDB). Use *Export data* / *Import analysis* to move them between machines.
 
@@ -61,7 +64,8 @@ The coaching rules are in [app/js/coach.js](app/js/coach.js). Each rule has a be
 
 - Single-camera 2D pose: far-side players are small, so their metrics are less certain. Use the two-pass crops setting (on by default).
 - Shots are detected from wrist-swing peaks. Soft dinks can be missed, so use *Players & settings → sensitivity* to tune it.
-- Ball tracking is experimental (color + motion). It is used only for the overlay.
+- Ball tracking uses your calibrated ball color and size plus motion. It is still used only for the overlay, and it needs the ball to move between analyzed frames.
+- Identity tracking with shirt color only helps when partners wear different colors. If they wear the same color, it falls back to position.
 - Every finding shows its confidence and sample size (n).
 
 ## Project layout
@@ -73,8 +77,10 @@ app/
   js/processor.js   frame loop: pose -> tracking -> ball
   js/pose.js        MediaPipe Pose Landmarker (WASM/WebGL)
   js/court.js       homography, zones, crop regions
-  js/tracking.js    player identity tracking
-  js/ball.js        experimental ball finder
+  js/calibration.js player & ball calibration steps
+  js/detector.js    per-frame pose detection (crops) + shirt colour sampling
+  js/tracking.js    player identity tracking (seeded by calibration, colour-aware)
+  js/ball.js        ball finder (calibrated colour/size) + calibration helpers
   js/analysis.js    shots, rallies, metrics
   js/coach.js       rules -> findings, training plan
   js/drills.js      drill library
