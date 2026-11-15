@@ -175,6 +175,47 @@ try {
   const o2 = tr2.update(0, [{ cx: 5, cy: 30, color: BLUE }, { cx: 15, cy: 30, color: RED }]);
   check('seeded init assigns by calibration', o2[0]?.color === RED && o2[1]?.color === BLUE);
 
+  // ---- skeleton following: same shirts, partners cross diagonally — identity from movement alone
+  const GREY = [128, 128, 128];
+  const box = (cx, cy) => ({ x0: cx / 40, x1: cx / 40 + 0.03, y0: cy / 60, y1: cy / 60 + 0.1 });
+  const trS = new Tracker([
+    { team: 'A', label: 'L', color: GREY, seed: { cx: 4, cy: 28, box: box(4, 28) } },
+    { team: 'A', label: 'R', color: GREY, seed: { cx: 16, cy: 34, box: box(16, 34) } },
+  ]);
+  let swapS = false;
+  for (let i = 0; i <= 40; i++) {
+    const t = i / 10, f = i / 40;
+    const a = { id: 'L', cx: 4 + 12 * f, cy: 28 + 6 * f, color: GREY }, b = { id: 'R', cx: 16 - 12 * f, cy: 34 - 6 * f, color: GREY };
+    a.box = box(a.cx, a.cy); b.box = box(b.cx, b.cy);
+    const out = trS.update(t, i >= 19 && i <= 21 ? [i % 2 ? a : b] : i % 2 ? [a, b] : [b, a]); // one hidden behind the other at the crossing
+    if (i >= 19 && i <= 21) continue; // standing on the same spot: either label is right
+    if (out[0] && out[0].id !== 'L') swapS = true;
+    if (out[1] && out[1].id !== 'R') swapS = true;
+  }
+  check('skeleton tracker keeps identities when same-shirt partners cross', !swapS);
+  // follow look: a missed player is found again near their last skeleton, never the partner
+  const trF2 = new Tracker([{ team: 'A', label: 'P', seed: { cx: 10, cy: 35, box: box(10, 35) } }, { team: 'A', label: 'Q', seed: { cx: 4, cy: 35, box: box(4, 35) } }]);
+  trF2.update(0, [{ cx: 10, cy: 35, box: box(10, 35) }, { cx: 4, cy: 35, box: box(4, 35) }]);
+  const miss = trF2.update(0.1, [{ cx: 4.2, cy: 35, box: box(4.2, 35) }]);
+  const targets = trF2.followTargets(0.1, miss);
+  const partnerClaim = trF2.claim(0, 0.1, { cx: 4.3, cy: 35, box: box(4.2, 35) }, miss);
+  const okClaim = trF2.claim(0, 0.1, { cx: 10.3, cy: 35.2, box: box(10.3, 35.2) }, miss);
+  check('follow look recovers a missed player, not the partner', targets.length === 1 && targets[0].si === 0 && !partnerClaim && okClaim && miss[0].cx === 10.3);
+  // processing starts at the calibration frame, then goes back to the start
+  const { frameTimes, processingOrder } = await import('../js/processor.js');
+  const ft = frameTimes([{ start: 0, end: 2 }, { start: 5, end: 6 }], 0.5);
+  const po = processingOrder(ft, 1.0);
+  check('tracking runs forward and backward from the calibration frame', ft.length === 8 && ft[po.forward[0]].t === 1 && po.backward.map(i => ft[i].t).join() === '0.5,0' && po.forward.length + po.backward.length === ft.length, `fwd ${po.forward.map(i => ft[i].t).join(',')} | back ${po.backward.map(i => ft[i].t).join(',')}`);
+
+  // ---- coach callouts
+  const { buildCallouts, activeCallouts } = await import('../js/callouts.js');
+  const CO = buildCallouts(match, A);
+  const perSlotOverlap = CO.some((c, i) => CO.some((d, j) => j > i && d.slot === c.slot && d.t0 < c.t1 && d.t1 > c.t0));
+  check('coach callouts generated, one per player at a time', CO.length > 5 && !perSlotOverlap, `${CO.length} callouts; e.g. ${[...new Set(CO.map(c => c.text))].slice(0, 5).join(' | ')}`);
+  check('callouts tell the slow player to get to the kitchen', CO.some(c => c.slot === 0 && /kitchen|Move up/.test(c.text)));
+  const c0 = CO[0];
+  check('callouts appear only at their moment', activeCallouts(CO, c0.t0 + 0.1, match.players).includes(c0) && !activeCallouts(CO, c0.t1 + 0.5, match.players).includes(c0) && activeCallouts(CO, c0.t0 + 0.1, match.players, match.players[c0.slot].team === 'A' ? 'B' : 'A').every(c => match.players[c.slot].team !== match.players[c0.slot].team));
+
   // ---- ball calibration on synthetic frames
   const { BallDetector, sampleBallColor, ballConfigFromSamples } = await import('../js/ball.js');
   const W = 1280, H = 720;

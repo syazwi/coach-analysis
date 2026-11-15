@@ -14,6 +14,7 @@ import { setupCalibration, attachPlayback } from './calibration.js';
 import { toGrid, fromGrid, isEmpty, poseMasked, maskedAt, drawMask, attachPainter } from './mask.js';
 import { computeAccuracy, CLASSES, PHASES } from './accuracy.js';
 import { setupTrim } from './trim.js';
+import { buildCallouts, activeCallouts, drawCallouts, headFromPose } from './callouts.js';
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -332,6 +333,7 @@ function recompute() {
   state.R = computeAccuracy(state.match, state.A);
   state.R.perPlayer.forEach((p, k) => { state.A.metrics[k].accuracy = p.accuracy; });
   state.C = coach(state.match, state.A);
+  state.CO = buildCallouts(state.match, state.A);
 }
 
 async function openMatch(match, isNew = false) {
@@ -665,8 +667,9 @@ $('#exportDlg').addEventListener('cancel', e => { if (ex.running) e.preventDefau
 $('#exStart').addEventListener('click', async () => {
   const segs = exportSegments(exForm.range.value);
   if (!segs.length) return;
-  const o = Object.fromEntries(['skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes'].map(k => [k, exForm[k].checked]));
+  const o = Object.fromEntries(['skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes', 'coach'].map(k => [k, exForm[k].checked]));
   o.shot = o.hud;
+  o.coachWho = $('#tCoachWho').value;
   const mp4 = canEncodeMp4();
   const suffix = { all: 'full', rallies: 'rallies', highlights: 'highlights', finding: 'clips' }[exForm.range.value];
   const name = `${state.match.name}-analysis-${suffix}.${mp4 ? 'mp4' : 'webm'}`.replace(/[\\/:*?"<>|]+/g, ' ');
@@ -821,7 +824,7 @@ $$('.speed button').forEach(b => b.addEventListener('click', () => {
   video.playbackRate = +b.dataset.rate;
   $$('.speed button').forEach(x => x.classList.toggle('active', x === b));
 }));
-['#tSkel', '#tBall', '#tCourt', '#tLabels'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
+['#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
 document.addEventListener('keydown', e => {
   if (state.view !== 'analysis' || !state.match || e.target.closest('input,select,textarea,dialog')) return;
   if (e.code === 'Space') { e.preventDefault(); playBtn.click(); }
@@ -845,7 +848,13 @@ function poseAt(k, t) {
   return near ? near.p[k] : null;
 }
 
-const viewOverlayOpts = () => ({ court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true });
+const viewOverlayOpts = () => ({ court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true, coach: $('#tCoach').checked, coachWho: $('#tCoachWho').value });
+
+/** Team filter for coach callouts: 'all' | 'mine' | 'opp' -> 'all' | 'A' | 'B'. */
+function calloutTeam(who) {
+  const mine = state.match.cfg.myTeam || 'A';
+  return who === 'mine' ? mine : who === 'opp' ? (mine === 'A' ? 'B' : 'A') : 'all';
+}
 
 function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
   const { match, A } = state;
@@ -887,6 +896,11 @@ function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
       ctx.beginPath(); ctx.arc(b[0] * w, b[1] * h, Math.max(3, w / 300), 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = 1;
+  }
+  // coach callouts: speech bubbles above the player
+  if (o.coach && state.CO?.length) {
+    const act = activeCallouts(state.CO, t, match.players, calloutTeam(o.coachWho || 'all'));
+    drawCallouts(ctx, w, h, t, act, k => { const p = poseAt(k, t); return p ? headFromPose(p.lm, w, h) : null; }, match.players, playerColor);
   }
 }
 

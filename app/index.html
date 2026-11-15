@@ -182,10 +182,11 @@
             <button class="btn primary" id="plConfirm">Next: ball →</button>
           </div>
         </div>
-        <p class="muted" id="plHint">Pick a frame where all players are visible and standing apart (ideally near the start of the analysis range). Select a player on the right, then click their skeleton.</p>
+        <p class="muted" id="plHint">Pick a frame where all players are visible and standing apart. Select a player on the right, then <b>draw a box around them</b> — their skeleton is fitted inside it. Drag any joint to correct it.</p>
         <div class="toolbar">
           <div class="seg">
-            <button type="button" class="on" data-pltool="select">🖐 Identify players</button>
+            <button type="button" class="on" data-pltool="draw" title="Drag a box around the selected player to fit their skeleton; drag a joint to move it">✏️ Draw skeleton</button>
+            <button type="button" data-pltool="select" title="Click a detected skeleton to give it to the selected player">🖐 Click to pick</button>
             <button type="button" data-pltool="erase" title="Paint over spectators, benches or the next court so they are never detected">🧽 Eraser</button>
             <button type="button" data-pltool="restore" title="Paint to un-erase">↺ Un-erase</button>
           </div>
@@ -197,7 +198,13 @@
           <div class="cal-wrap"><canvas id="plCanvas"></canvas></div>
           <div>
             <div id="plSlots" class="slot-list"></div>
-            <p class="muted small">The shirt colour sampled here is used to keep each player's identity when partners cross or someone is briefly hidden. If a player isn't detected, click on their <b>feet</b> to place them manually.</p>
+            <label class="small">Follow players by
+              <select id="plTrackBy">
+                <option value="skeleton" selected>Skeleton &amp; movement (recommended)</option>
+                <option value="color">Skeleton + shirt colour (teams in very different colours)</option>
+              </select>
+            </label>
+            <p class="muted small">Each player's skeleton is followed from this frame forward and backward through the video, using where they were and how they were moving. If the skeleton fit misses, a stick figure is placed in your box — drag its joints onto the player (at least the feet).</p>
           </div>
         </div>
         <label class="scrub"><button type="button" class="btn icon" id="plPlay" title="Play / pause">▶</button>
@@ -303,6 +310,10 @@
             <label class="toggle"><input type="checkbox" id="tBall" checked> Ball</label>
             <label class="toggle"><input type="checkbox" id="tCourt" checked> Court</label>
             <label class="toggle"><input type="checkbox" id="tLabels" checked> Labels</label>
+            <label class="toggle" title="Short lines a coach would shout, shown above the player at the moment they apply"><input type="checkbox" id="tCoach" checked> 📣 Coach</label>
+            <select id="tCoachWho" aria-label="Coach callouts for" class="mini-select">
+              <option value="all">everyone</option><option value="mine">my team</option><option value="opp">opponents</option>
+            </select>
           </div>
           <div class="toolbar erase-bar" id="eraseBar" hidden>
             <b>Eraser</b>
@@ -453,6 +464,7 @@
       <label class="check"><input type="checkbox" name="minimap" checked> Mini court map</label>
       <label class="check"><input type="checkbox" name="hud" checked> Rally & shot info</label>
       <label class="check"><input type="checkbox" name="notes" checked> Coach notes (findings)</label>
+      <label class="check"><input type="checkbox" name="coach" checked> 📣 Coach callouts (what to do, as it happens)</label>
     </fieldset>
     <p class="muted small" id="exEstimate"></p>
     <div id="exProgressWrap" hidden>

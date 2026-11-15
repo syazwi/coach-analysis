@@ -3,7 +3,21 @@ import { $, clamp, esc, fmtTime, seekVideo, toast } from './util.js';
 import { applyH, sideOf, COURT, imageToCourt, UNLIMITED, outside, inArea } from './court.js';
 import { L } from './pose.js';
 import { FrameDetector } from './detector.js';
-import { colorDist } from './tracking.js';
+import { colorDist, finishDetection, skeletonBox, boxIoU, torsoColor, COLOR_WEIGHT } from './tracking.js';
+
+/**
+ * Standing stick figure in box coordinates (0..1), MediaPipe's 33 landmarks, facing the camera
+ * (the person's left side is on the image right). Used when no skeleton can be fitted in a drawn box.
+ */
+const TEMPLATE = [
+  [0.5, 0.07], [0.52, 0.055], [0.535, 0.05], [0.55, 0.05], [0.48, 0.055], [0.465, 0.05], [0.45, 0.05], [0.57, 0.06], [0.43, 0.06],
+  [0.52, 0.09], [0.48, 0.09], [0.68, 0.2], [0.32, 0.2], [0.76, 0.36], [0.24, 0.36], [0.8, 0.5], [0.2, 0.5],
+  [0.81, 0.54], [0.19, 0.54], [0.8, 0.55], [0.2, 0.55], [0.78, 0.53], [0.22, 0.53], [0.6, 0.52], [0.4, 0.52],
+  [0.62, 0.74], [0.38, 0.74], [0.63, 0.94], [0.37, 0.94], [0.62, 0.97], [0.38, 0.97], [0.66, 0.995], [0.34, 0.995],
+];
+// joints you can drag (the face and fingers follow the head / wrists)
+const HANDLES = [L.nose, L.ls, L.rs, L.le, L.re, L.lw, L.rw, L.lh, L.rh, L.lk, L.rk, L.la, L.ra];
+const FOLLOWERS = { [L.nose]: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [L.lw]: [17, 19, 21], [L.rw]: [18, 20, 22], [L.la]: [29, 31], [L.ra]: [30, 32] };
 import { BallDetector, sampleBallColor, ballConfigFromSamples } from './ball.js';
 import { drawSkeleton, drawCourtOverlay, drawLabel, playerColor, BALL_COLOR } from './render.js';
 import { toGrid, fromGrid, isEmpty, poseMasked, drawMask, attachPainter } from './mask.js';
@@ -48,7 +62,7 @@ const hsv2rgb = (h, s, v) => {
 
 export function setupCalibration({ video, getDraft, setStep, onReady }) {
   // ================================================================ players
-  const pc = { dets: [], assign: [], hands: [], active: 0, detector: null, busy: false, t: 0, scale: 1, tool: 'select', mask: null, hover: null };
+  const pc = { dets: [], assign: [], hands: [], active: 0, detector: null, busy: false, t: 0, scale: 1, tool: 'draw', mask: null, hover: null, drag: null, dragged: false };
   const HANDS = { L: L.lw, R: L.rw };
   const wristPos = (det, side) => [det.lm[HANDS[side] * 3], det.lm[HANDS[side] * 3 + 1], det.lm[HANDS[side] * 3 + 2]];
   const plCanvas = $('#plCanvas');
@@ -62,22 +76,15 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     return { ctx, w: canvas.width, h: canvas.height };
   }
 
-  function bbox(d) {
-    let x0 = 1, x1 = 0, y0 = 1, y1 = 0;
-    for (let i = 0; i < 33; i++) {
-      if (d.lm[i * 3 + 2] < 0.3) continue;
-      const x = d.lm[i * 3], y = d.lm[i * 3 + 1];
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
-    }
-    return { x0, x1, y0, y1 };
-  }
+  const bbox = d => d.box || skeletonBox(d.lm) || { x0: 0, x1: 0, y0: 0, y1: 0 };
 
   const teamSide = team => (team === 'A' ? 'near' : 'far');
 
-  /** Greedy matching of detections to player slots: shirt colour + position from the previous frame, else left/right order. */
+  /** Greedy matching of detections to player slots: the player's previous skeleton (position, overlap) + a little colour, else left/right order. */
   function autoAssign(dets) {
     const players = getDraft().players;
     const prev = pc.assign;
+    const colorW = COLOR_WEIGHT[$('#plTrackBy').value] ?? COLOR_WEIGHT.skeleton;
     const teamIdx = players.map((p, k) => players.slice(0, k).filter(q => q.team === p.team).length);
     const teamSize = t => players.filter(p => p.team === t).length;
     const pairs = [];
@@ -88,7 +95,8 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
         let c;
         if (pa) {
           const cd = colorDist(pa.color, d.color);
-          c = (cd === null ? 6 : 25 * cd) + 0.3 * Math.hypot(d.cx - pa.cx, d.cy - pa.cy);
+          const iou = pa.lm ? boxIoU(bbox(pa), d.box) : 0;
+          c = (cd === null ? colorW * 0.25 : colorW * cd) + 0.6 * Math.hypot(d.cx - pa.cx, d.cy - pa.cy) + 5 * (1 - iou);
         } else {
           const expX = teamSize(p.team) === 1 ? 10 : teamIdx[si] === 0 ? 5 : 15;
           c = Math.abs(d.cx - expX) + 0.2 * Math.abs(Math.abs(d.cy - COURT.NET) - 15);
@@ -102,28 +110,141 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
       if (out[p.si] || usedD.has(p.di)) continue;
       out[p.si] = dets[p.di]; usedD.add(p.di);
     }
-    // keep manual placements the detector could not replace
-    players.forEach((_, si) => { if (!out[si] && prev[si]?.manual) out[si] = prev[si]; });
+    // keep hand-placed / drawn skeletons the detector could not replace
+    players.forEach((_, si) => { if (!out[si] && (prev[si]?.manual || prev[si]?.drawn)) out[si] = prev[si]; });
     return out;
   }
+
+  async function ensureDetector() {
+    const d = getDraft();
+    if (pc.detector && pc.detCal !== d.cal) { pc.detector.close(); pc.detector = null; } // court was re-calibrated
+    if (!pc.detector) {
+      $('#plHint').textContent = 'Loading pose model…';
+      pc.detector = await FrameDetector.create({ crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE', area: UNLIMITED, thorough: true, model: d.cfg.model === 'lite' ? 'full' : d.cfg.model });
+      pc.detCal = d.cal;
+    }
+    return pc.detector;
+  }
+
+  /** Refresh court position, box and shirt colour after a skeleton was drawn or a joint moved. */
+  function refreshDrawn(det) {
+    const d = getDraft();
+    const fresh = finishDetection(det.lm, d.cal);
+    det.cx = fresh.cx; det.cy = fresh.cy; det.box = fresh.box; det.conf = Math.max(det.conf || 0, fresh.conf);
+    det.masked = poseMasked(pc.mask, det.lm);
+    try {
+      const c = document.createElement('canvas');
+      c.width = 640; c.height = Math.round(640 * video.videoHeight / video.videoWidth);
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(video, 0, 0, c.width, c.height);
+      det.color = torsoColor(g.getImageData(0, 0, c.width, c.height).data, c.width, c.height, det.lm) || det.color || null;
+    } catch { /* tainted canvas: keep the previous colour */ }
+  }
+
+  /** The coach drew a box around the selected player: fit their skeleton inside it (or place a stick figure). */
+  async function fitInBox(box) {
+    const d = getDraft();
+    const si = pc.active;
+    const p = d.players[si];
+    let det = null;
+    try {
+      const fd = await ensureDetector();
+      det = fd.detectBox(video, box, { pad: 0.25 });
+    } catch (e) { console.error(e); }
+    let fitted = true;
+    if (!det) {
+      fitted = false;
+      const lm = new Float32Array(33 * 3);
+      TEMPLATE.forEach(([u, v], i) => { lm[i * 3] = box.x0 + u * (box.x1 - box.x0); lm[i * 3 + 1] = box.y0 + v * (box.y1 - box.y0); lm[i * 3 + 2] = 0.9; });
+      det = { lm, conf: 0.9 };
+    }
+    det.drawn = true;
+    refreshDrawn(det);
+    if (!Number.isFinite(det.cy)) {
+      toast('The bottom of that box is above the horizon — draw it down to the player’s feet.', 5000);
+      return;
+    }
+    det.t = video.currentTime;
+    pc.assign = pc.assign.map((a, k) => (k !== si && a && boxIoU(bbox(a), det.box) > 0.6 ? null : a));
+    pc.assign[si] = det;
+    pc.t = video.currentTime;
+    toast(fitted ? `${p.label}: skeleton fitted. Drag any joint to correct it.` : `${p.label}: no skeleton found in the box — a stick figure was placed. Drag its joints (at least the feet) onto the player.`, fitted ? 2600 : 6000);
+    if (sideOf(det.cy) !== teamSide(p.team)) toast(`Note: ${p.label} plays on the ${teamSide(p.team)} side but is on the ${sideOf(det.cy)} side in this frame.`, 5000);
+    const next = pc.assign.findIndex(a => !a);
+    pc.active = next >= 0 ? next : si;
+    renderPlayers();
+  }
+
+  // ---- draw tool: drag a box around a player, or drag a joint of an identified skeleton
+  const canvasPos = e => { const r = plCanvas.getBoundingClientRect(); return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, r]; };
+  function jointAt(x, y, r) {
+    let best = null, bd = 11;
+    const order = [pc.active, ...pc.assign.map((_, k) => k).filter(k => k !== pc.active)];
+    for (const k of order) {
+      const a = pc.assign[k];
+      if (!a?.lm) continue;
+      for (const j of HANDLES) {
+        if (a.lm[j * 3 + 2] < 0.2) continue;
+        const dd = Math.hypot((x - a.lm[j * 3]) * r.width, (y - a.lm[j * 3 + 1]) * r.height);
+        if (dd < bd) { bd = dd; best = { k, j }; }
+      }
+      if (best && k === pc.active) break; // the selected player's joints win
+    }
+    return best;
+  }
+  plCanvas.addEventListener('pointerdown', e => {
+    if (pc.tool !== 'draw' || e.button !== 0) return;
+    pc.dragged = false;
+    if (!video.paused) { video.pause(); toast('Paused — now draw around a player.'); pc.dragged = true; return; }
+    const [x, y, r] = canvasPos(e);
+    const hit = jointAt(x, y, r);
+    pc.drag = hit ? { kind: 'joint', ...hit, x0: x, y0: y } : { kind: 'box', x0: x, y0: y, x1: x, y1: y };
+    if (hit) pc.active = hit.k;
+    plCanvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  plCanvas.addEventListener('pointermove', e => {
+    if (pc.tool !== 'draw') return;
+    const [x, y, r] = canvasPos(e);
+    if (!pc.drag) { plCanvas.style.cursor = jointAt(x, y, r) ? 'grab' : 'crosshair'; return; }
+    if (Math.hypot((x - pc.drag.x0) * r.width, (y - pc.drag.y0) * r.height) > 4) pc.dragged = true;
+    if (pc.drag.kind === 'joint') {
+      const a = pc.assign[pc.drag.k], j = pc.drag.j;
+      const dx = x - a.lm[j * 3], dy = y - a.lm[j * 3 + 1];
+      for (const f of [j, ...(FOLLOWERS[j] || [])]) { a.lm[f * 3] += dx; a.lm[f * 3 + 1] += dy; a.lm[f * 3 + 2] = Math.max(a.lm[f * 3 + 2], 0.9); }
+      a.drawn = true;
+      plCanvas.style.cursor = 'grabbing';
+    } else { pc.drag.x1 = x; pc.drag.y1 = y; }
+    requestAnimationFrame(renderPlayers);
+  });
+  plCanvas.addEventListener('pointerup', e => {
+    if (pc.tool !== 'draw' || !pc.drag) return;
+    const g = pc.drag; pc.drag = null;
+    const r = plCanvas.getBoundingClientRect();
+    if (g.kind === 'joint') {
+      const a = pc.assign[g.k];
+      refreshDrawn(a); a.t = video.currentTime; pc.t = video.currentTime;
+      plCanvas.style.cursor = 'grab';
+      renderPlayers();
+      return;
+    }
+    const box = { x0: Math.min(g.x0, g.x1), x1: Math.max(g.x0, g.x1), y0: Math.min(g.y0, g.y1), y1: Math.max(g.y0, g.y1) };
+    if ((box.x1 - box.x0) * r.width < 8 || (box.y1 - box.y0) * r.height < 14) { renderPlayers(); return; } // a click, handled below
+    fitInBox(box);
+  });
 
   async function detectPlayers() {
     if (pc.busy || !video.paused) return;
     pc.busy = true;
     const d = getDraft();
     try {
-      if (pc.detector && pc.detCal !== d.cal) { pc.detector.close(); pc.detector = null; } // court was re-calibrated
-      if (!pc.detector) {
-        $('#plHint').textContent = 'Loading pose model…';
-        pc.detector = await FrameDetector.create({ crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE', area: UNLIMITED, thorough: true, model: d.cfg.model === 'lite' ? 'full' : d.cfg.model });
-        pc.detCal = d.cal;
-      }
-      pc.dets = pc.detector.detect(video);
+      pc.dets = (await ensureDetector()).detect(video);
+      pc.dets.forEach(det => { det.t = video.currentTime; });
       pc.dets.forEach(det => { det.masked = poseMasked(pc.mask, det.lm); });
       pc.t = video.currentTime;
       pc.assign = autoAssign(pc.dets);
       const found = pc.assign.filter(Boolean).length;
-      $('#plHint').innerHTML = `Detected <b>${pc.dets.length}</b> people (on or around the court); <b>${found}/${d.players.length}</b> players matched. Check each name sits on the right person — select a player on the right, then click their skeleton (or their feet if no skeleton). Then click a player’s <b>L</b>/<b>R</b> hand marker to set their paddle hand (or leave it on Auto).`;
+      $('#plHint').innerHTML = `Detected <b>${pc.dets.length}</b> people (on or around the court); <b>${found}/${d.players.length}</b> players matched. Check each name sits on the right person. If not, select the player on the right and <b>draw a box around them</b> (✏️) — or drag a joint to fix their skeleton. Then click a player’s <b>L</b>/<b>R</b> hand marker to set their paddle hand (or leave it on Auto).`;
       pc.active = Math.max(0, pc.assign.findIndex(a => !a));
     } catch (e) {
       console.error(e);
@@ -184,11 +305,26 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
         }
       }
     });
+    // draw tool: box being drawn, draggable joints of the selected player
+    if (pc.drag?.kind === 'box') {
+      const g = pc.drag;
+      ctx.setLineDash([6, 4]); ctx.strokeStyle = playerColor(d.players, pc.active); ctx.lineWidth = 2;
+      ctx.strokeRect(Math.min(g.x0, g.x1) * w, Math.min(g.y0, g.y1) * h, Math.abs(g.x1 - g.x0) * w, Math.abs(g.y1 - g.y0) * h);
+      ctx.setLineDash([]);
+    }
+    const act = pc.assign[pc.active];
+    if (pc.tool === 'draw' && act?.lm) {
+      for (const j of HANDLES) {
+        if (act.lm[j * 3 + 2] < 0.2 || j === L.lw || j === L.rw) continue; // wrists have their L/R markers
+        ctx.fillStyle = '#f0efec'; ctx.strokeStyle = playerColor(d.players, pc.active); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(act.lm[j * 3] * w, act.lm[j * 3 + 1] * h, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
+    }
     $('#plSlots').innerHTML = d.players.map((p, si) => {
       const a = pc.assign[si];
       const status = !a ? '<span style="color:var(--sev-high)">not identified</span>'
         : a.manual ? (a.color ? `placed by hand · shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span>` : 'placed by hand (no shirt colour)')
-        : `shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span> · ${fmtFeet(a.cy, a.cx)}`;
+        : `${a.drawn ? '✏️ drawn · ' : 'skeleton · '}${fmtFeet(a.cy, a.cx)}${Math.abs((a.t ?? pc.t) - video.currentTime) > 0.05 ? ` · <span style="color:var(--sev-med)">from ${fmtTime(a.t ?? pc.t)} — redraw here</span>` : ''}`;
       return `<div class="slot ${si === pc.active ? 'active' : ''}" data-si="${si}">
         <i style="background:${playerColor(d.players, si)}"></i>
         <input data-label="${si}" value="${esc(p.label)}" aria-label="Player name">
@@ -227,7 +363,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   });
 
   plCanvas.addEventListener('click', e => {
-    if (pc.tool !== 'select') return; // eraser handles its own strokes
+    if (pc.tool === 'erase' || pc.tool === 'restore' || (pc.tool === 'draw' && pc.dragged)) return; // eraser strokes, box drawing and joint drags handle themselves
     if (!video.paused) { video.pause(); toast('Paused — now click a player.'); return; }
     const d = getDraft();
     const r = plCanvas.getBoundingClientRect();
@@ -339,8 +475,10 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
   document.querySelectorAll('[data-pltool]').forEach(b => b.addEventListener('click', () => {
     pc.tool = b.dataset.pltool;
     document.querySelectorAll('[data-pltool]').forEach(x => x.classList.toggle('on', x === b));
-    plPainter.setMode(pc.tool !== 'select');
-    if (pc.tool !== 'select') video.pause();
+    const painting = pc.tool === 'erase' || pc.tool === 'restore';
+    plPainter.setMode(painting);
+    if (painting) video.pause();
+    plCanvas.style.cursor = pc.tool === 'draw' ? 'crosshair' : painting ? 'cell' : '';
     renderPlayers();
   }));
   $('#plEraseClear').addEventListener('click', () => {
@@ -355,11 +493,13 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     if (missing.length && !confirm(`${missing.join(', ')} ${missing.length > 1 ? 'are' : 'is'} not identified. Continue and let the tracker find ${missing.length > 1 ? 'them' : 'this player'} automatically?`)) return;
     d.players.forEach((p, si) => {
       const a = pc.assign[si];
-      p.seed = a ? { cx: +a.cx.toFixed(2), cy: +a.cy.toFixed(2), t: +pc.t.toFixed(2) } : null;
+      const box = a?.lm ? bbox(a) : null;
+      p.seed = a ? { cx: +a.cx.toFixed(2), cy: +a.cy.toFixed(2), t: +(a.t ?? pc.t).toFixed(2), box: box ? { x0: +box.x0.toFixed(4), y0: +box.y0.toFixed(4), x1: +box.x1.toFixed(4), y1: +box.y1.toFixed(4) } : null } : null;
       p.color = a?.color || null;
     });
     d.players.forEach((p, si) => { p.hand = pc.hands[si] || null; }); // null = detect from swings
     d.cfg.playArea = UNLIMITED; // players are followed wherever they move
+    d.cfg.trackBy = $('#plTrackBy').value;
     d.cfg.ignore = isEmpty(pc.mask) ? null : fromGrid(pc.mask); // eraser zones
     video.pause();
     if (d.cfg.ball) startBall(); else onReady();
@@ -372,6 +512,8 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     pc.hands = d.players.map(p => p.hand || null);
     pc.mask = toGrid(d.cfg.ignore);
     pc.dets = [];
+    $('#plTrackBy').value = d.cfg.trackBy || 'skeleton';
+    plCanvas.style.cursor = pc.tool === 'draw' ? 'crosshair' : '';
     const s = $('#plScrub');
     s.max = video.duration;
     s.value = clamp((d.cfg.rangeStart || 0) + 1, 0, video.duration);
