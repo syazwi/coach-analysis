@@ -6,7 +6,7 @@ import { coach, buildPlan } from './coach.js';
 import { DRILLS, FOCUS_LIST } from './drills.js';
 import { saveMatch, getMatch, listSummaries, deleteMatch, matchToJSON, matchFromJSON, saveVideo, getVideo, hasVideo, deleteVideo } from './db.js';
 import { exportVideo, askSaveLocation, canEncodeMp4, canPickFile, outputSize, totalDuration } from './exporter.js';
-import { drawSkeleton, drawPaddleHand, drawCourtOverlay, drawLabel, drawTopDown, drawTopDownAt, drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
+import { drawSkeleton, drawPaddleHand, drawPlayerBox, drawCourtOverlay, drawLabel, drawTopDown, drawTopDownAt, drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
 import { importFromLink } from './importer.js';
@@ -557,7 +557,39 @@ $('#lensTabs').addEventListener('click', e => {
   renderFindings();
 });
 
+/** Jump the video to just before a moment and play it (the user keeps full control). */
+async function jumpTo(t, { lead = 1.5, play = true } = {}) {
+  if (!videoReady()) return;
+  stopPlaylist();
+  video.pause();
+  await seekVideo(video, clamp(t - lead, 0, video.duration || t));
+  drawOverlayNow(true);
+  const wrap = $('#playerWrap').getBoundingClientRect();
+  if (wrap.top < 0 || wrap.bottom > window.innerHeight) $('#playerWrap').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (play) video.play().catch(() => {});
+}
+
+/** The moments a finding is about (event times from its clips). */
+const momentsOf = f => f.clips.map(c => Math.min(c.end - 2, c.start + 2.5));
+
+function renderCallouts() {
+  const el = $('#findings');
+  const { match } = state;
+  const team = calloutTeam($('#tCoachWho').value);
+  const list = (state.CO || []).filter(c => team === 'all' || match.players[c.slot].team === team);
+  if (!list.length) { el.innerHTML = '<p class="muted">No coach comments for this filter.</p>'; return; }
+  const ICON = { fix: '📣', exploit: '🎯', good: '👍' };
+  el.innerHTML = `<div class="callout-list">${list.map(c => `
+    <button type="button" class="callout-item k-${c.kind}" data-t="${c.t0}" data-t1="${c.t1}">
+      <span class="mono">${fmtTime(c.t0)}</span>
+      <i style="background:${playerColor(match.players, c.slot)}"></i>
+      <b>${esc(match.players[c.slot].label)}</b>
+      <span>${ICON[c.kind] || '📣'} ${esc(c.text)}</span>
+    </button>`).join('')}</div>`;
+}
+
 function renderFindings() {
+  if (state.lens === 'callouts') { renderCallouts(); return; }
   const list = state.C.findings.filter(f => state.lens === 'all' || f.lens === state.lens);
   const el = $('#findings');
   if (!list.length) {
@@ -571,6 +603,8 @@ function renderFindings() {
       <div class="f-evidence">${esc(f.evidence)}${f.impact ? ` · in ${fmtPct(f.impact.share)} of lost points` : ''}</div>
       <div class="f-label">${f.lens === 'fix' ? 'What happens' : 'Opportunity'}</div><p>${esc(f.problem)}</p>
       <div class="f-label">${f.lens === 'fix' ? 'Counter / fix' : 'How to exploit'}</div><p>${esc(f.counter)}</p>
+      ${f.clips.length ? `<div class="f-label">When it happened — click to watch</div>
+      <div class="moments">${momentsOf(f).slice(0, 12).map(t => `<button type="button" class="moment" data-t="${t}">▶ ${fmtTime(t)}</button>`).join('')}${f.clips.length > 12 ? `<span class="muted small">+${f.clips.length - 12} more</span>` : ''}</div>` : ''}
       <div class="f-actions">
         ${f.clips.length ? `<button class="btn small primary" data-act="play">▶ Play ${f.clips.length} clip${f.clips.length > 1 ? 's' : ''}</button>` : ''}
         ${f.lens === 'fix' ? f.drills.map(d => `<button class="btn small ghost" data-act="drill" data-drill="${d}">Drill: ${esc(DRILLS[d].name)}</button>`).join('') : ''}
@@ -579,14 +613,22 @@ function renderFindings() {
 }
 
 $('#findings').addEventListener('click', e => {
+  const co = e.target.closest('.callout-item');
+  if (co) { jumpTo(+co.dataset.t, { lead: 1.0 }); return; }
   const card = e.target.closest('.finding'); if (!card) return;
   const f = state.C.findings.find(x => x.id === card.dataset.id);
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'drill') { state.drillHighlight = e.target.closest('[data-act]').dataset.drill; show('drills'); return; }
+  const wasSelected = state.selected === f.id;
   state.selected = f.id;
   renderFindings();
   drawTimelineNow();
-  if (act === 'play') startPlaylist(f.clips.map((c, i) => ({ ...c, label: `${f.title} — clip ${i + 1}/${f.clips.length}` })));
+  if (act === 'play') { startPlaylist(f.clips.map((c, i) => ({ ...c, label: `${f.title} — clip ${i + 1}/${f.clips.length}` }))); return; }
+  const mo = e.target.closest('.moment');
+  if (mo) { jumpTo(+mo.dataset.t); return; }
+  // clicking the comment itself goes to the first moment it happened
+  if (!wasSelected && f.clips.length) jumpTo(momentsOf(f)[0]);
+  else if (!f.clips.length) toast('This finding is a match-wide pattern without a single moment to show.');
 });
 
 // ---- playlist
@@ -667,7 +709,7 @@ $('#exportDlg').addEventListener('cancel', e => { if (ex.running) e.preventDefau
 $('#exStart').addEventListener('click', async () => {
   const segs = exportSegments(exForm.range.value);
   if (!segs.length) return;
-  const o = Object.fromEntries(['skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes', 'coach'].map(k => [k, exForm[k].checked]));
+  const o = Object.fromEntries(['box', 'skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes', 'coach'].map(k => [k, exForm[k].checked]));
   o.shot = o.hud;
   o.coachWho = $('#tCoachWho').value;
   const mp4 = canEncodeMp4();
@@ -824,12 +866,40 @@ $$('.speed button').forEach(b => b.addEventListener('click', () => {
   video.playbackRate = +b.dataset.rate;
   $$('.speed button').forEach(x => x.classList.toggle('active', x === b));
 }));
-['#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
+['#tBox', '#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
+$('#tCoachWho').addEventListener('change', () => { if (state.lens === 'callouts') renderFindings(); });
+
+// seek bar, ±5 s, click the video to play/pause
+const seek = $('#seek');
+let seeking = false;
+const jump = s => { if (!videoReady()) return; stopPlaylist(); video.currentTime = clamp(video.currentTime + s, 0, video.duration); };
+$('#btnBack5').addEventListener('click', () => jump(-5));
+$('#btnFwd5').addEventListener('click', () => jump(5));
+seek.addEventListener('input', () => { if (!videoReady()) return; seeking = true; stopPlaylist(); video.currentTime = +seek.value; });
+seek.addEventListener('change', () => { seeking = false; });
+video.addEventListener('loadedmetadata', () => { seek.max = video.duration || 1; });
+$('#playerWrap').addEventListener('click', e => {
+  if (state.erase?.on || e.target.closest('canvas.painting')) return;
+  playBtn.click();
+});
+function syncSeek() {
+  if (seeking || !video.duration) return;
+  if (+seek.max !== video.duration) seek.max = video.duration;
+  seek.value = video.currentTime;
+  seek.style.setProperty('--p', `${(video.currentTime / video.duration) * 100}%`);
+  // highlight the coach comments on screen right now
+  if (state.lens === 'callouts') {
+    const t = video.currentTime;
+    $$('#findings .callout-item').forEach(b => b.classList.toggle('now', t >= +b.dataset.t && t <= +b.dataset.t1));
+  }
+}
 document.addEventListener('keydown', e => {
   if (state.view !== 'analysis' || !state.match || e.target.closest('input,select,textarea,dialog')) return;
   if (e.code === 'Space') { e.preventDefault(); playBtn.click(); }
   if (e.code === 'ArrowLeft') stepBy(-1);
   if (e.code === 'ArrowRight') stepBy(1);
+  if (e.code === 'KeyJ') jump(-5);
+  if (e.code === 'KeyL') jump(5);
 });
 
 // ---- overlay drawing
@@ -848,7 +918,7 @@ function poseAt(k, t) {
   return near ? near.p[k] : null;
 }
 
-const viewOverlayOpts = () => ({ court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true, coach: $('#tCoach').checked, coachWho: $('#tCoachWho').value });
+const viewOverlayOpts = () => ({ box: $('#tBox').checked, court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true, coach: $('#tCoach').checked, coachWho: $('#tCoachWho').value });
 
 /** Team filter for coach callouts: 'all' | 'mine' | 'opp' -> 'all' | 'A' | 'B'. */
 function calloutTeam(who) {
@@ -864,9 +934,11 @@ function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
     const pose = poseAt(k, t);
     if (!pose) return;
     const color = playerColor(match.players, k);
+    const box = o.box ? drawPlayerBox(ctx, pose.lm, w, h, color, lw) : null;
     if (o.skel) { drawSkeleton(ctx, pose.lm, w, h, color, lw); drawPaddleHand(ctx, pose.lm, w, h, A.handed[k], color); }
-    if (o.labels) {
-      const nx = pose.lm[L.nose * 3] * w, ny = pose.lm[L.nose * 3 + 1] * h;
+    if (o.labels || box) {
+      const nx = box ? box.x + box.w / 2 : pose.lm[L.nose * 3] * w, ny = box ? box.y + 2 : pose.lm[L.nose * 3 + 1] * h;
+      if (!o.labels) { drawLabel(ctx, p.label, nx, ny - 8, color); return; }
       const zone = Number.isFinite(pose.cy) ? ` · ${fmt(Math.max(0, distToNet(pose.cy) - 7), 0)} ft to NVZ` : '';
       drawLabel(ctx, `${p.label}${zone}`, nx, ny - 8, color);
     }
@@ -1213,6 +1285,7 @@ function loop() {
   requestAnimationFrame(loop);
   if (state.view !== 'analysis' || !state.match) return;
   drawOverlayNow();
+  syncSeek();
   const pl = state.playlist;
   if (pl && !video.paused && video.currentTime >= pl.clips[pl.i].end) {
     if (pl.i < pl.clips.length - 1) { pl.i++; playClip(); } else { video.pause(); stopPlaylist(); }

@@ -27,9 +27,10 @@ You need an internet connection the first time, because the MediaPipe pose model
 4. **Ball calibration**: press ▶ (slow motion helps) and pause when the ball is visible, then click it on 1–3 frames (sun and shade, near and far) and set the ring to the ball's size. The magnifier helps you click precisely. **Test detection** shows what the detector finds on the current frame. Detection then uses your ball's color and size instead of a generic yellow/green guess. You can also skip ball tracking.
 5. **Processing**: pose estimation runs frame by frame, with a live preview. Expect roughly 1–3× the video length at 10 fps on a laptop.
 6. **Match analysis**:
-   - Video with skeleton, ball, court and label overlays
+   - Video with a **square box following each player** (name on top), skeleton, ball, court and label overlays
+   - **Video controls:** seek bar, −5s / +5s (J / L), frame step (← / →), play/pause (space or click the video), ¼×–2× speed
    - Rally/shot timeline
-   - Coach panel with findings and clip playlists
+   - Coach panel with findings and clip playlists. **Click a finding to jump the video to when it happened**, or click one of its time chips (▶ 1:42) to jump to that moment. The **📣 Comments** tab lists every coach callout in time order; click one to jump there. The comment on screen is highlighted while the video plays.
    - Live top-down court view, heatmaps, shot inspector (joint angles at contact) and stats tabs
    - **📣 Coach callouts**: short lines a coach would shout appear in a speech bubble above the player at the moment they apply. Examples: *Follow your return — get to the kitchen!*, *They’re at the line — drop it soft!*, *Paddle up!*, *Split step — get set!*, *Close the middle!*, *Hit at Opp 2’s feet!*, *Great point!*. The rim colour shows the type: amber = fix, green = opening to attack, blue = well done. Show them for everyone, your team or the opponents (toggle next to the overlay switches). They can also be burned into a saved video.
    **Erase spectators** (Match analysis): paint over spectators on the video, then *Remove detections in erased areas* (whole match, with *Undo*), or *Re-analyze with erased areas* to rerun with them ignored from the start.

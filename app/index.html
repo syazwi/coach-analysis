@@ -296,16 +296,22 @@
             <video id="video" playsinline preload="auto"></video>
             <canvas id="overlay"></canvas>
           </div>
+          <div class="seekbar">
+            <input type="range" id="seek" min="0" max="1" step="0.01" value="0" aria-label="Video position">
+          </div>
           <div class="controls">
-            <button class="btn icon" id="btnBack" title="Back one step">⏮</button>
-            <button class="btn icon" id="btnPlay" title="Play/pause (space)">▶</button>
-            <button class="btn icon" id="btnFwd" title="Forward one step">⏭</button>
+            <button class="btn icon" id="btnBack5" title="Back 5 seconds (J)">−5s</button>
+            <button class="btn icon" id="btnBack" title="Back one frame (←)">⏮</button>
+            <button class="btn icon" id="btnPlay" title="Play/pause (space, or click the video)">▶</button>
+            <button class="btn icon" id="btnFwd" title="Forward one frame (→)">⏭</button>
+            <button class="btn icon" id="btnFwd5" title="Forward 5 seconds (L)">+5s</button>
             <span id="timeLabel" class="mono">0:00 / 0:00</span>
             <span class="sep"></span>
             <span class="speed">
               <button data-rate="0.25">¼×</button><button data-rate="0.5">½×</button><button data-rate="1" class="active">1×</button><button data-rate="2">2×</button>
             </span>
             <span class="sep"></span>
+            <label class="toggle" title="Square box following each player"><input type="checkbox" id="tBox" checked> Box</label>
             <label class="toggle"><input type="checkbox" id="tSkel" checked> Skeleton</label>
             <label class="toggle"><input type="checkbox" id="tBall" checked> Ball</label>
             <label class="toggle"><input type="checkbox" id="tCourt" checked> Court</label>
@@ -345,7 +351,9 @@
             <button data-lens="all" class="active">All</button>
             <button data-lens="fix">Fix my game</button>
             <button data-lens="exploit">Exploit opponents</button>
+            <button data-lens="callouts" title="Every coach callout in time order — click one to jump there">📣 Comments</button>
           </div>
+          <p class="muted small" id="coachHint">Click a finding or one of its moments to jump the video to when it happened.</p>
           <div id="findings" class="findings"></div>
         </aside>
       </div>
@@ -457,6 +465,7 @@
     </div>
     <fieldset class="checks">
       <legend>Burn into the video</legend>
+      <label class="check"><input type="checkbox" name="box" checked> Player boxes</label>
       <label class="check"><input type="checkbox" name="skel" checked> Skeletons</label>
       <label class="check"><input type="checkbox" name="court" checked> Court lines & kitchen</label>
       <label class="check"><input type="checkbox" name="ball" checked> Ball trail</label>

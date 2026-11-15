@@ -386,6 +386,7 @@ The development machine has no NVIDIA GPU, Python or Node, so the GPU pipeline (
 | Pose estimation (MediaPipe, two-pass crops for far players), player identity tracking | ✅ |
 | Player calibration (draw a box → skeleton fit or stick figure, draggable joints, click-to-identify, no area limit, eraser ignore-zones, video playback, seed position + shirt color, paddle-hand selection, skeleton-following tracker with motion prediction + box overlap + zoomed follow looks, tracking forward & backward from the calibration frame, optional colour weighting, manual identity-swap fix) | ✅ |
 | Coach callouts on the video (fix / exploit / good, per player, filter by team, burned into saved videos) | ✅ heuristic; tune with coach feedback |
+| Player tracking boxes on the video, seek bar / ±5 s controls, click-to-jump from findings, moments and the comments list | ✅ |
 | Ball calibration (sampled color/hue range + size, magnifier, live test) | ✅ |
 | Ball tracking | ⚠️ calibrated color + size + motion, used for the overlay only |
 | Shot detection (wrist-swing peaks + team alternation), rallies, shot types, FH/BH, handedness | ✅ approximate |

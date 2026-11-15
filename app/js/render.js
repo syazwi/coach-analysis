@@ -78,6 +78,35 @@ export function drawLabel(ctx, text, x, y, color) {
   ctx.textAlign = 'left';
 }
 
+/**
+ * Square tracking box around a player's skeleton (corner brackets + faint frame).
+ * Returns the box in px {x, y, w, h} so labels can sit on top of it, or null.
+ */
+export function drawPlayerBox(ctx, lm, w, h, color, lineW = 2) {
+  let x0 = 1, x1 = 0, y0 = 1, y1 = 0;
+  for (let i = 0; i < 33; i++) {
+    if (lm[i * 3 + 2] < 0.3) continue;
+    x0 = Math.min(x0, lm[i * 3]); x1 = Math.max(x1, lm[i * 3]);
+    y0 = Math.min(y0, lm[i * 3 + 1]); y1 = Math.max(y1, lm[i * 3 + 1]);
+  }
+  if (!(x1 > x0 && y1 > y0)) return null;
+  const pw = (x1 - x0) * w, ph = (y1 - y0) * h;
+  const pad = Math.max(4, ph * 0.08);
+  const bx = x0 * w - pad, by = y0 * h - pad, bw = pw + pad * 2, bh = ph + pad * 2;
+  ctx.save();
+  ctx.strokeStyle = color; ctx.lineWidth = Math.max(1, lineW * 0.5); ctx.globalAlpha = 0.45;
+  ctx.strokeRect(bx, by, bw, bh);
+  ctx.globalAlpha = 1; ctx.lineWidth = lineW * 1.4; ctx.lineCap = 'square';
+  const c = Math.min(bw, bh) * 0.22;
+  ctx.beginPath();
+  for (const [px, py, dx, dy] of [[bx, by, 1, 1], [bx + bw, by, -1, 1], [bx, by + bh, 1, -1], [bx + bw, by + bh, -1, -1]]) {
+    ctx.moveTo(px + dx * c, py); ctx.lineTo(px, py); ctx.lineTo(px, py + dy * c);
+  }
+  ctx.stroke();
+  ctx.restore();
+  return { x: bx, y: by, w: bw, h: bh };
+}
+
 // ---------- top-down court ----------
 const VIEW = { x0: -6, x1: 26, y0: -8, y1: 52 };
 export function courtMapper(w, h) {
