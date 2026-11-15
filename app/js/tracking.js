@@ -25,8 +25,8 @@ export function toDetection(landmarks, region, vw, vh, cal) {
 }
 
 /** Keep confident detections whose feet are inside the player area; drop duplicates from overlapping crops. */
-export function filterDetections(dets, area = UNLIMITED) {
-  const inside = dets.filter(d => inArea(d.cx, d.cy, area) && d.conf > 0.3);
+export function filterDetections(dets, area = UNLIMITED, minConf = 0.3) {
+  const inside = dets.filter(d => inArea(d.cx, d.cy, area) && d.conf > minConf);
   inside.sort((a, b) => b.conf - a.conf);
   const kept = [];
   for (const d of inside) {

@@ -82,7 +82,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
       if (pc.detector && pc.detCal !== d.cal) { pc.detector.close(); pc.detector = null; } // court was re-calibrated
       if (!pc.detector) {
         $('#plHint').textContent = 'Loading pose model…';
-        pc.detector = await FrameDetector.create({ model: d.cfg.model, crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE', area: UNLIMITED });
+        pc.detector = await FrameDetector.create({ crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE', area: UNLIMITED, thorough: true, model: d.cfg.model === 'lite' ? 'full' : d.cfg.model });
         pc.detCal = d.cal;
       }
       pc.dets = pc.detector.detect(video);
@@ -135,7 +135,7 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     $('#plSlots').innerHTML = d.players.map((p, si) => {
       const a = pc.assign[si];
       const status = !a ? '<span style="color:var(--sev-high)">not identified</span>'
-        : a.manual ? 'manual position (no shirt colour)'
+        : a.manual ? (a.color ? `placed by hand · shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span>` : 'placed by hand (no shirt colour)')
         : `shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span> · ${fmtFeet(a.cy, a.cx)}`;
       return `<div class="slot ${si === pc.active ? 'active' : ''}" data-si="${si}">
         <i style="background:${playerColor(d.players, si)}"></i>
@@ -213,11 +213,11 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
         toast('Click on the player’s feet (on the ground). That point is above the horizon or too far away to map onto the court.', 5000);
         return;
       }
-      entry = { manual: true, cx: p[0], cy: p[1], color: null };
+      entry = { manual: true, cx: p[0], cy: p[1], color: manualShirtColor(x, y, p) };
     }
     if (sideOf(entry.cy) !== teamSide(p.team)) {
-      toast(`${p.label} is on the ${teamSide(p.team)} team, but that person is on the ${sideOf(entry.cy)} side. Change “Your team” in step 1 if sides are swapped.`, 5000);
-      return;
+      // allowed: players move around (walking back, collecting balls); just let the user know
+      toast(`Note: ${p.label} plays on the ${teamSide(p.team)} side but is on the ${sideOf(entry.cy)} side in this frame. That's fine if they're just moving around — if the teams are swapped, change “Your team” in step 1.`, 6000);
     }
     pc.assign = pc.assign.map((a, k) => (k !== si && a === entry ? null : a));
     pc.assign[si] = entry;
@@ -225,6 +225,30 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     pc.active = next >= 0 ? next : si;
     renderPlayers();
   });
+
+  /**
+   * Shirt colour for a player placed by clicking their feet (no skeleton): estimate their height in the
+   * image from the court scale at that spot, then average the pixels where the torso should be.
+   */
+  function manualShirtColor(x, y, court) {
+    const d = getDraft();
+    const [ax, ay] = applyH(d.cal.toImg, court[0] - 1, court[1]);
+    const [bx, by] = applyH(d.cal.toImg, court[0] + 1, court[1]);
+    const pxPerFt = Math.hypot((bx - ax) * video.videoWidth, (by - ay) * video.videoHeight) / 2;
+    const H = pxPerFt * 5.6;                      // typical standing height in px
+    if (!(H > 8)) return null;
+    const cx = x * video.videoWidth, fy = y * video.videoHeight;
+    const x0 = Math.round(cx - H * 0.1), w = Math.max(2, Math.round(H * 0.2));
+    const y0 = Math.round(fy - H * 0.75), h = Math.max(2, Math.round(H * 0.2));
+    if (x0 < 0 || y0 < 0 || x0 + w > video.videoWidth || y0 + h > video.videoHeight) return null;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(video, x0, y0, w, h, 0, 0, w, h);
+    const px = g.getImageData(0, 0, w, h).data;
+    let r = 0, gg = 0, b = 0, n = 0;
+    for (let i = 0; i < px.length; i += 4) { r += px[i]; gg += px[i + 1]; b += px[i + 2]; n++; }
+    return n ? [Math.round(r / n), Math.round(gg / n), Math.round(b / n)] : null;
+  }
 
   let scrubTimer = null;
   $('#plScrub').addEventListener('input', async e => {

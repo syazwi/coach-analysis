@@ -16,14 +16,14 @@ async function getVision() {
   return { mod, vision: await visionPromise };
 }
 
-export async function createLandmarker(model = 'lite', numPoses = 3, runningMode = 'VIDEO') {
+export async function createLandmarker(model = 'lite', numPoses = 3, runningMode = 'VIDEO', minConf = 0.35) {
   const { mod, vision } = await getVision();
   const opts = delegate => ({
     baseOptions: { modelAssetPath: MODELS[model] || MODELS.lite, delegate },
     runningMode,
     numPoses,
-    minPoseDetectionConfidence: 0.35,
-    minPosePresenceConfidence: 0.35,
+    minPoseDetectionConfidence: minConf,
+    minPosePresenceConfidence: minConf,
     minTrackingConfidence: 0.35,
   });
   try {

@@ -108,6 +108,11 @@ try {
   check('standard area drops far-out players', filterDetections(outsideDets, courtMod.AREA_PRESETS.standard).length === 1);
   check('wide area keeps players outside the lines', filterDetections(outsideDets, courtMod.AREA_PRESETS.xwide).length === 3);
   check('default (no limit) keeps everyone on the ground', filterDetections([...outsideDets, fake(40, 90)]).length === 4);
+  const { thoroughRegions } = await import('../js/detector.js');
+  const tiles = thoroughRegions(cal, 1920, 1080);
+  const farTiles = tiles.slice(0, 2);
+  check('calibration zoom tiles for far players', tiles.length === 3 && farTiles.every(r => r.sw < 1920 * 0.75 && r.sh < 1080 * 0.7 && r.sx >= 0 && r.sy >= 0 && r.sx + r.sw <= 1920 && r.sy + r.sh <= 1080) && farTiles[0].sx + farTiles[0].sw > farTiles[1].sx,
+    tiles.map(r => `${r.sw}x${r.sh}@${r.sx},${r.sy}`).join(' | '));
   match.players[0].hand = 'L';
   const Ahand = analyze(match);
   check('calibrated paddle hand overrides detection', Ahand.handed[0] === 'L' && Ahand.handed[1] === 'R', Ahand.handed.join(''));
