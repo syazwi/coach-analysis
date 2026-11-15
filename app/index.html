@@ -85,7 +85,7 @@
             <ul>
               <li>Film from <b>behind the baseline, raised 2–3 m</b>, centered, whole court in frame.</li>
               <li><b>60 fps, 1080p</b>, tripod or fence mount — no hand-held.</li>
-              <li>Keep teams on the same ends (trim with start/end if they switch sides).</li>
+              <li>If teams switch ends, split them into separate games in <b>Game time</b> and analyze each part separately.</li>
             </ul>
           </div>
         </div>
@@ -104,10 +104,6 @@
             <label>Your team is on the
               <select name="myTeam"><option value="A">near side (closest to camera)</option><option value="B">far side</option></select>
             </label>
-            <div class="form-row">
-              <label>Start (s) <input name="rangeStart" type="number" min="0" step="1" value="0"></label>
-              <label>End (s) <input name="rangeEnd" type="number" min="0" step="1" placeholder="end"></label>
-            </div>
             <details>
               <summary>Analysis settings</summary>
               <div class="form-row">
@@ -120,9 +116,41 @@
               </div>
               <label class="check"><input type="checkbox" name="crops" checked> Two-pass crops (better for far-side players)</label>
               <label class="check"><input type="checkbox" name="ball" checked> Ball tracking (experimental)</label>
+              <label class="check"><input type="checkbox" name="keepVideo" checked> Keep a copy of the video in the app (reopen without re-attaching)</label>
             </details>
             <button type="button" class="btn primary" id="toCalibrate" disabled>Next: calibrate court →</button>
           </form>
+        </div>
+      </div>
+
+      <div class="card" id="trimCard" hidden>
+        <div class="row-head small">
+          <h2>3. Game time <small>analyze only while the game is on — skip warm-up, breaks and dead time</small></h2>
+          <div class="actions">
+            <button type="button" class="btn ghost" id="trimAuto">Suggest from motion</button>
+            <button type="button" class="btn ghost" id="trimAll">Use whole video</button>
+          </div>
+        </div>
+        <div class="trim-grid">
+          <div>
+            <div class="player-wrap"><video id="trimVideo" muted playsinline preload="auto"></video></div>
+            <canvas id="trimBar" title="Click to jump"></canvas>
+            <div class="controls">
+              <button type="button" class="btn icon" id="trimPlay">▶</button>
+              <button type="button" class="btn small ghost" id="trimBack5">−5 s</button>
+              <button type="button" class="btn small ghost" id="trimFwd5">+5 s</button>
+              <span id="trimTime" class="mono">0:00</span>
+              <span class="sep"></span>
+              <button type="button" class="btn" id="trimStartBtn">⇤ Set game start</button>
+              <button type="button" class="btn" id="trimEndBtn">Set game end ⇥</button>
+            </div>
+          </div>
+          <div>
+            <div id="trimList" class="slot-list"></div>
+            <button type="button" class="btn small ghost" id="trimAdd">+ Split / add another game here</button>
+            <p id="trimSummary" class="small"></p>
+            <p class="muted small">Play the video and press <b>Set game start</b> when the first serve happens and <b>Set game end</b> after the last point. For several games, use <b>Split / add</b> at a break. <b>Suggest from motion</b> scans the video and proposes segments for you to check.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -211,7 +239,8 @@
         <h1 id="matchTitle">Match</h1>
         <div class="actions">
           <button class="btn ghost" id="btnHighlights">▶ Highlights</button>
-          <button class="btn ghost" id="btnExportReel">Export reel (.webm)</button>
+          <button class="btn primary" id="btnSaveVideo">💾 Save analyzed video</button>
+          <button class="btn ghost" id="btnStoreVideo">Keep video in app</button>
           <button class="btn ghost" id="btnExportJson">Export data</button>
           <button class="btn ghost" id="btnSettings">Players & settings</button>
         </div>
@@ -220,6 +249,21 @@
         Video not loaded. <label class="btn primary small">Attach video file<input type="file" id="attachInput" accept="video/*" hidden></label>
         <button class="btn small ghost" id="reimportBtn" hidden>Re-import from link</button>
         <span class="muted small" id="attachNote">Pick the same file you analyzed.</span>
+      </div>
+
+      <div class="card" id="reviewCard">
+        <div class="row-head small">
+          <h2>Game review <small>shot-by-shot accuracy</small></h2>
+          <span class="muted small" id="reviewNote"></span>
+        </div>
+        <div class="review-grid">
+          <div id="accTiles" class="acc-tiles"></div>
+          <div id="accTable"></div>
+          <div>
+            <div class="chart-wrap"><canvas id="accChart"></canvas><div class="tooltip" id="accTip"></div></div>
+            <div class="legend small" id="accLegend"></div>
+          </div>
+        </div>
       </div>
 
       <div class="analysis-grid">
@@ -345,6 +389,49 @@
     <div class="actions">
       <button class="btn ghost" value="cancel">Close</button>
       <button class="btn primary" value="save" id="saveSettings">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Save analyzed video dialog -->
+<dialog id="exportDlg">
+  <form method="dialog" class="form" id="exportForm">
+    <h2>Save analyzed video</h2>
+    <p class="muted small" id="exFormat"></p>
+    <label>What to include
+      <select name="range">
+        <option value="all">Whole analyzed range</option>
+        <option value="rallies" selected>Rallies only (skip dead time)</option>
+        <option value="highlights">Highlights (best rallies)</option>
+        <option value="finding">Clips of the selected finding</option>
+      </select>
+    </label>
+    <div class="form-row">
+      <label>Resolution
+        <select name="height"><option value="720" selected>720p</option><option value="1080">1080p</option><option value="0">Source</option></select>
+      </label>
+      <label>Frame rate
+        <select name="fps"><option value="30" selected>30 fps</option><option value="24">24 fps</option><option value="15">15 fps (faster export)</option></select>
+      </label>
+    </div>
+    <fieldset class="checks">
+      <legend>Burn into the video</legend>
+      <label class="check"><input type="checkbox" name="skel" checked> Skeletons</label>
+      <label class="check"><input type="checkbox" name="court" checked> Court lines & kitchen</label>
+      <label class="check"><input type="checkbox" name="ball" checked> Ball trail</label>
+      <label class="check"><input type="checkbox" name="labels" checked> Player labels</label>
+      <label class="check"><input type="checkbox" name="minimap" checked> Mini court map</label>
+      <label class="check"><input type="checkbox" name="hud" checked> Rally & shot info</label>
+      <label class="check"><input type="checkbox" name="notes" checked> Coach notes (findings)</label>
+    </fieldset>
+    <p class="muted small" id="exEstimate"></p>
+    <div id="exProgressWrap" hidden>
+      <div class="progress"><div id="exBar"></div></div>
+      <p class="small" id="exStatus"></p>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="exClose">Close</button>
+      <button type="button" class="btn primary" id="exStart">Save video</button>
     </div>
   </form>
 </dialog>

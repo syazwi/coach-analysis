@@ -16,16 +16,22 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
 
   const tracker = new Tracker(players);
   const ball = cfg.ball ? new BallDetector(vw, vh, cal, cfg.ballCal || null) : null;
-  const start = Math.max(0, cfg.rangeStart || 0);
-  const end = Math.min(video.duration, cfg.rangeEnd || video.duration);
+  // game segments chosen in "Game time" (older analyses: a single start/end range)
+  const segments = (cfg.segments?.length ? cfg.segments : [{ start: cfg.rangeStart || 0, end: cfg.rangeEnd || video.duration }])
+    .map(g => ({ start: Math.max(0, g.start), end: Math.min(video.duration, g.end || video.duration) }))
+    .filter(g => g.end > g.start);
   const step = 1 / cfg.fps;
+  const totalLen = segments.reduce((s, g) => s + (g.end - g.start), 0);
   const samples = [];
   const t0 = performance.now();
+  let done = 0;
 
-  onStatus?.('Analyzing frames…');
+  onStatus?.(`Analyzing frames (${segments.length} segment${segments.length > 1 ? 's' : ''})…`);
   try {
-    for (let t = start; t <= end; t += step) {
-      if (isCancelled?.()) break;
+    outer: for (const seg of segments) {
+    if (ball) ball.prev = null; // no motion diff across a skipped gap
+    for (let t = seg.start; t <= seg.end; t += step) {
+      if (isCancelled?.()) break outer;
       await seekVideo(video, t);
       const assigned = tracker.update(t, detector.detect(video, step * 1000));
       const b = ball ? ball.detect(video, t) : null;
@@ -35,10 +41,12 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
         b: b ? [+b[0].toFixed(4), +b[1].toFixed(4)] : null,
       };
       samples.push(sample);
-      const frac = (t - start) / Math.max(0.001, end - start);
+      done += step;
+      const frac = Math.min(1, done / Math.max(0.001, totalLen));
       const elapsed = (performance.now() - t0) / 1000;
       onProgress?.(frac, elapsed / Math.max(frac, 1e-3) - elapsed);
       onFrame?.(sample);
+    }
     }
   } finally {
     detector.close();

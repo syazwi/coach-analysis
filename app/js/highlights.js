@@ -16,11 +16,11 @@ export function pickHighlights(A, myTeam, max = 8) {
  * Plays clips and records a composited canvas. drawFrame(ctx, w, h) must draw video + overlays.
  * Returns a Blob (video/webm). Audio is not included.
  */
-export async function recordReel(video, clips, drawFrame, onProgress) {
+export async function recordReel(video, clips, drawFrame, onProgress, size = null) {
   const w = video.videoWidth, h = video.videoHeight;
   const scale = Math.min(1, 1280 / w);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
+  canvas.width = size?.width ?? Math.round(w * scale); canvas.height = size?.height ?? Math.round(h * scale);
   const ctx = canvas.getContext('2d');
   const stream = canvas.captureStream(30);
   const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));

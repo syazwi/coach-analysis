@@ -1,0 +1,78 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>CourtSense export test</title></head>
+<body><p style="font:13px sans-serif;color:#666">Run in a normal (non-headless) Chrome/Edge window: the H.264 encoder needs the GPU.</p><pre id="out">running…</pre>
+<script type="module">
+import { exportVideo, canEncodeMp4 } from '../js/exporter.js';
+import { saveVideo, getVideo, hasVideo, deleteVideo } from '../js/db.js';
+
+const out = document.getElementById('out');
+const log = [];
+const check = (name, ok, info = '') => { log.push(`${ok ? 'PASS' : 'FAIL'} ${name}${info ? ' — ' + info : ''}`); flush(); };
+const flush = () => { out.textContent = log.join('\n'); };
+
+// Synthetic 3 s source clip (moving ball), encoded frame by frame with WebCodecs + mp4-muxer.
+async function makeSourceVideo(seconds = 3, fps = 30) {
+  const { Muxer, ArrayBufferTarget } = await import('../vendor/mp4-muxer.mjs');
+  const c = document.createElement('canvas'); c.width = 640; c.height = 360;
+  const g = c.getContext('2d');
+  const target = new ArrayBufferTarget();
+  const muxer = new Muxer({ target, video: { codec: 'avc', width: 640, height: 360 }, fastStart: 'in-memory' });
+  const enc = new VideoEncoder({ output: (ch, meta) => muxer.addVideoChunk(ch, meta), error: e => { throw e; } });
+  enc.configure({ codec: 'avc1.42e01f', width: 640, height: 360, bitrate: 1e6, framerate: fps, avc: { format: 'avc' }, hardwareAcceleration: 'prefer-software' });
+  log.push('.. encoder configured'); flush();
+  for (let i = 0; i < seconds * fps; i++) {
+    const t = i / fps;
+    g.fillStyle = '#2e5e8a'; g.fillRect(0, 0, 640, 360);
+    g.fillStyle = '#d9f23d'; g.beginPath(); g.arc(50 + t * 150, 180, 10, 0, 7); g.fill();
+    const f = new VideoFrame(c, { timestamp: Math.round(t * 1e6), duration: Math.round(1e6 / fps) });
+    enc.encode(f, { keyFrame: i % 30 === 0 }); f.close();
+  }
+  log.push('.. frames queued'); flush();
+  await enc.flush(); enc.close(); muxer.finalize();
+  return new Blob([target.buffer], { type: 'video/mp4' });
+}
+
+function loadVideo(blob) {
+  const v = document.createElement('video');
+  v.muted = true; v.preload = 'auto';
+  return new Promise((res, rej) => {
+    v.onloadeddata = () => res(v);
+    v.onerror = () => rej(new Error('video load failed'));
+    v.src = URL.createObjectURL(blob);
+  });
+}
+
+try {
+  check('WebCodecs available', canEncodeMp4());
+  log.push('.. encoding source'); flush();
+  const src = await makeSourceVideo(3);
+  log.push('.. source encoded ' + src.size); flush();
+  const v = await loadVideo(src);
+  log.push('.. source loaded'); flush();
+  check('source video ready', v.videoWidth === 640 && v.duration > 2, `${v.videoWidth}x${v.videoHeight}, ${v.duration.toFixed(2)} s`);
+
+  let frames = 0;
+  const t0 = performance.now();
+  const blob = await exportVideo({
+    video: v, fps: 15, height: 0,
+    segments: [{ start: 0.2, end: 1.2, label: 'A' }, { start: 1.6, end: 2.4, label: 'B' }],
+    draw: (ctx, w, h, t, seg) => { ctx.drawImage(v, 0, 0, w, h); ctx.fillStyle = '#fff'; ctx.fillText(`${seg.label} ${t.toFixed(2)}`, 10, 20); frames++; },
+  });
+  check('MP4 exported', blob && blob.type === 'video/mp4' && blob.size > 1000, `${frames} frames, ${(blob.size / 1024).toFixed(0)} KB, ${(performance.now() - t0).toFixed(0)} ms`);
+  check('frame count = segments × fps', frames === 27, `${frames}`);
+  const back = await loadVideo(blob);
+  check('exported MP4 plays back', back.videoWidth === 640 && Math.abs(back.duration - 1.8) < 0.25, `${back.videoWidth}x${back.videoHeight}, ${back.duration.toFixed(2)} s`);
+
+  const file = new File([src], 'source.mp4', { type: 'video/mp4' });
+  await saveVideo('export-test', file);
+  const stored = await getVideo('export-test');
+  check('video kept in app (IndexedDB)', (await hasVideo('export-test')) && stored.size === file.size && stored.name === 'source.mp4', `${stored?.size} bytes`);
+  await deleteVideo('export-test');
+  check('stored video removed', !(await hasVideo('export-test')));
+} catch (e) {
+  log.push('FAIL exception — ' + (e.stack || e));
+}
+flush();
+document.title = log.some(l => l.startsWith('FAIL')) ? 'FAILED' : 'PASSED';
+</script>
+</body></html>

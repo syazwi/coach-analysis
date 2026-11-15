@@ -1,5 +1,5 @@
 // IndexedDB persistence: full matches + light summaries for the dashboard.
-const DB_NAME = 'courtsense', VERSION = 1;
+const DB_NAME = 'courtsense', VERSION = 2;
 let dbp = null;
 
 function open() {
@@ -9,6 +9,7 @@ function open() {
       const db = req.result;
       if (!db.objectStoreNames.contains('matches')) db.createObjectStore('matches', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('summaries')) db.createObjectStore('summaries', { keyPath: 'id' });
+      if (!db.objectStoreNames.contains('videos')) db.createObjectStore('videos', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -35,7 +36,24 @@ export const listSummaries = async () => ((await tx('summaries', 'readonly', s =
 export const deleteMatch = id => Promise.all([
   tx('matches', 'readwrite', s => s.delete(id)),
   tx('summaries', 'readwrite', s => s.delete(id)),
+  tx('videos', 'readwrite', s => s.delete(id)),
 ]);
+
+// Original match video kept in the app so a saved analysis reopens without re-attaching the file.
+export async function saveVideo(id, file) {
+  if (navigator.storage?.estimate) {
+    const { quota = 0, usage = 0 } = await navigator.storage.estimate();
+    if (quota && quota - usage < file.size * 1.1) throw new Error(`Not enough browser storage (${((quota - usage) / 1e9).toFixed(1)} GB free, need ${(file.size / 1e9).toFixed(1)} GB).`);
+  }
+  navigator.storage?.persist?.().catch(() => {});
+  return tx('videos', 'readwrite', s => s.put({ id, blob: file, name: file.name, size: file.size, type: file.type, savedAt: Date.now() }));
+}
+export async function getVideo(id) {
+  const r = await tx('videos', 'readonly', s => s.get(id));
+  return r ? new File([r.blob], r.name, { type: r.type || 'video/mp4' }) : null;
+}
+export const hasVideo = async id => (await tx('videos', 'readonly', s => s.getKey(id))) !== undefined;
+export const deleteVideo = id => tx('videos', 'readwrite', s => s.delete(id));
 
 // JSON (typed arrays -> plain arrays)
 export function matchToJSON(match) {

@@ -100,6 +100,15 @@ try {
   const json = matchToJSON(match);
   const back2 = matchFromJSON(json);
   check('json round-trip', back2.samples[5].p[0].lm instanceof Float32Array && back2.samples.length === samples.length, `${(json.length / 1e6).toFixed(1)} MB`);
+  // ---- accuracy (game review)
+  const { computeAccuracy } = await import('../js/accuracy.js');
+  const R = computeAccuracy(match, A);
+  check('every shot rated', R.review.length === A.shots.length && R.review.every(x => x.score >= 0 && x.score <= 100));
+  const accMe = R.perPlayer[0].accuracy, accP = R.perPlayer[1].accuracy;
+  check('errors count as blunders', R.perPlayer[0].counts.blunder >= 4, `Me blunders: ${R.perPlayer[0].counts.blunder}`);
+  check('winner rated brilliant', R.perPlayer[1].counts.brilliant >= 1, `Partner brilliant: ${R.perPlayer[1].counts.brilliant}`);
+  check('accuracy: error-prone player lower', accMe < accP, `Me ${accMe.toFixed(1)}% vs Partner ${accP.toFixed(1)}%; all: ${R.perPlayer.map(p => p.accuracy.toFixed(0)).join(' / ')}`);
+
   // ---- player calibration: partners in different shirts cross paths; identities must survive
   const { Tracker } = await import('../js/tracking.js');
   const RED = [200, 40, 40], BLUE = [40, 60, 200];

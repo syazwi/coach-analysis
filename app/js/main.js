@@ -4,12 +4,15 @@ import { processVideo } from './processor.js';
 import { analyze } from './analysis.js';
 import { coach, buildPlan } from './coach.js';
 import { DRILLS, FOCUS_LIST } from './drills.js';
-import { saveMatch, getMatch, listSummaries, deleteMatch, matchToJSON, matchFromJSON } from './db.js';
-import { drawSkeleton, drawCourtOverlay, drawLabel, drawTopDown, drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
+import { saveMatch, getMatch, listSummaries, deleteMatch, matchToJSON, matchFromJSON, saveVideo, getVideo, hasVideo, deleteVideo } from './db.js';
+import { exportVideo, askSaveLocation, canEncodeMp4, canPickFile, outputSize, totalDuration } from './exporter.js';
+import { drawSkeleton, drawCourtOverlay, drawLabel, drawTopDown, drawTopDownAt,drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
 import { importFromLink } from './importer.js';
 import { setupCalibration } from './calibration.js';
+import { computeAccuracy, CLASSES, PHASES } from './accuracy.js';
+import { setupTrim } from './trim.js';
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -30,6 +33,7 @@ const video = $('#video');
 
 // ------------------------------------------------------------------ key metrics (for trends & compare)
 const KEY_METRICS = [
+  { id: 'accuracy', label: 'Shot accuracy', better: 'higher', get: m => m.accuracy, f: v => (Number.isFinite(v) ? `${v.toFixed(1)}%` : '–') },
   { id: 'arrivalReturn', label: 'Kitchen arrival after return', unit: 's', better: 'lower', get: m => median(m.arrivalReturn.map(e => e.dt)), f: v => `${fmt(v, 1)} s` },
   { id: 'arrivalThird', label: 'Kitchen arrival after 3rd shot', unit: 's', better: 'lower', get: m => median(m.arrivalThird.map(e => e.dt)), f: v => `${fmt(v, 1)} s` },
   { id: 'transition', label: 'Time in transition zone', better: 'lower', get: m => m.zone.transition, f: v => fmtPct(v) },
@@ -97,6 +101,10 @@ dz.addEventListener('drop', async e => {
   if (f && f.type.startsWith('video')) await pickVideo(f);
 });
 
+// ---- game time (trim)
+const trim = setupTrim({ scanVideo: procVideo });
+$('#setupForm').fps.addEventListener('change', e => trim.setFps(+e.target.value));
+
 // ---- import from link (YouTube etc.)
 const linkStatusText = s => {
   const title = s.title ? `“${s.title}” — ` : '';
@@ -136,7 +144,8 @@ async function pickVideo(f, sourceUrl = null) {
   $('#videoInfo').innerHTML = `<b>${esc(f.name)}</b> · ${v.videoWidth}×${v.videoHeight} · ${fmtTime(v.duration)} · ${(f.size / 1e6).toFixed(0)} MB`;
   const form = $('#setupForm');
   if (!form.name.value) form.name.value = f.name.replace(/\.[^.]+$/, '');
-  form.rangeEnd.placeholder = Math.floor(v.duration);
+  trim.load(state.fileURL, v.duration);
+  trim.setFps(+form.fps.value);
   $('#toCalibrate').disabled = false;
 }
 
@@ -155,6 +164,7 @@ $('#toCalibrate').addEventListener('click', async () => {
     players.sort((a, b) => a.team.localeCompare(b.team));
   }
   players.forEach(p => { p.isMe = p.label === 'Me'; });
+  $('#trimVideo').pause();
   state.draft = {
     id: uid(),
     name: fd.get('name') || state.file.name,
@@ -162,13 +172,16 @@ $('#toCalibrate').addEventListener('click', async () => {
     cfg: {
       format, skill: fd.get('skill'), myTeam,
       fps: +fd.get('fps'), model: fd.get('model'),
-      crops: fd.get('crops') === 'on', ball: fd.get('ball') === 'on',
-      rangeStart: +fd.get('rangeStart') || 0, rangeEnd: +fd.get('rangeEnd') || 0,
+      crops: fd.get('crops') === 'on', ball: fd.get('ball') === 'on', keepVideo: fd.get('keepVideo') === 'on',
+      segments: trim.getSegments(),
       sensitivity: 3.5,
     },
     players,
     outcomes: {},
   };
+  const segs = state.draft.cfg.segments;
+  state.draft.cfg.rangeStart = segs[0].start;          // used by calibration frame defaults
+  state.draft.cfg.rangeEnd = segs[segs.length - 1].end;
   state.calPts = [];
   setStep(2);
   const scrub = $('#calScrub');
@@ -276,6 +289,9 @@ async function runProcessing() {
     match.samples = samples;
     if (state.cancel) toast('Stopped early — analyzing the part that was processed.');
     await openMatch(match, true);
+    if (match.cfg.keepVideo) {
+      saveVideo(match.id, state.file).then(refreshStoreButton).catch(e => toast(`Analysis saved, but the video copy wasn't: ${e.message}`, 6000));
+    }
     setStep(1);
     show('analysis');
   } catch (e) {
@@ -307,6 +323,8 @@ async function persist() {
 
 function recompute() {
   state.A = analyze(state.match);
+  state.R = computeAccuracy(state.match, state.A);
+  state.R.perPlayer.forEach((p, k) => { state.A.metrics[k].accuracy = p.accuracy; });
   state.C = coach(state.match, state.A);
 }
 
@@ -320,6 +338,8 @@ async function openMatch(match, isNew = false) {
   if (state.file && state.file.name === v.name && state.file.size === v.size) {
     if (video.src !== state.fileURL) await loadVideoMeta(video, state.fileURL).catch(() => {});
     $('#attachVideo').hidden = true;
+  } else if (await loadStoredVideo(match)) {
+    $('#attachVideo').hidden = true;
   } else {
     video.removeAttribute('src'); video.load();
     $('#attachVideo').hidden = false;
@@ -327,6 +347,14 @@ async function openMatch(match, isNew = false) {
     $('#attachNote').textContent = v.sourceUrl ? `Pick the same file, or re-import from ${v.sourceUrl}` : 'Pick the same file you analyzed.';
   }
   $('#playerWrap').style.aspectRatio = `${v.w} / ${v.h}`;
+  refreshStoreButton();
+}
+
+async function loadStoredVideo(match) {
+  const f = await getVideo(match.id).catch(() => null);
+  if (!f) return false;
+  if (!(await setVideoFile(f))) return false;
+  try { await loadVideoMeta(video, state.fileURL); return true; } catch { return false; }
 }
 
 $('#attachInput').addEventListener('change', async e => {
@@ -364,6 +392,7 @@ function renderAnalysis() {
   $('#matchTitle').textContent = match.name;
   $('#coachSummary').innerHTML = state.C.summary;
   renderFindings();
+  renderReview();
   renderLegends();
   renderHeatSelect();
   renderHeatmap();
@@ -378,6 +407,49 @@ function renderLegends() {
   $('#playerLegend').innerHTML = items;
   $('#tlLegend').innerHTML = `${items}<span><i style="background:${TEAM_COLORS.A};opacity:.4"></i>rally won by near team</span><span><i style="background:${TEAM_COLORS.B};opacity:.4"></i>won by far team</span><span><i style="background:#4a4a45"></i>unlabeled rally</span><span>▲ selected finding</span>`;
 }
+
+// ---- game review (accuracy)
+const clsInfo = id => CLASSES.find(c => c.id === id);
+const symHtml = c => `<span class="cls-sym" style="background:${c.color}">${c.sym}</span>`;
+
+function renderReview() {
+  const { match, R } = state;
+  const P = match.players;
+  $('#reviewNote').textContent = R.labeled
+    ? 'Scores use rally outcomes, what the opponent did with each shot, tactical fit and body mechanics.'
+    : 'Label rally outcomes (Rallies & outcomes tab) to include errors and winners in the scores.';
+  $('#accTiles').innerHTML = P.map((p, k) => {
+    const pp = R.perPlayer[k];
+    return `<div class="acc-tile" style="border-top-color:${playerColor(P, k)}">
+      <span>${esc(p.label)}</span><b>${Number.isFinite(pp.accuracy) ? pp.accuracy.toFixed(1) : '–'}<small style="display:inline;font-size:14px">%</small></b>
+      <small>${pp.n} shots · ${p.team === match.cfg.myTeam ? 'your team' : 'opponent'}</small></div>`;
+  }).join('');
+  const head = `<tr><th></th>${P.map((p, k) => `<th class="num"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${playerColor(P, k)};margin-right:4px"></i>${esc(p.label)}</th>`).join('')}</tr>`;
+  const rows = CLASSES.map(c => `<tr><td>${symHtml(c)}${c.name}</td>${P.map((_, k) => {
+    const n = R.perPlayer[k].counts[c.id];
+    return `<td class="num count"><a href="#" class="${n ? '' : 'zero'}" data-cls="${c.id}" data-slot="${k}" title="Play these shots">${n}</a></td>`;
+  }).join('')}</tr>`).join('');
+  const phases = PHASES.map(ph => `<tr><td class="muted">${ph.name}</td>${P.map((_, k) => { const v = R.perPlayer[k].byPhase[ph.id]; return `<td class="num muted">${Number.isFinite(v) ? v.toFixed(0) + '%' : '–'}</td>`; }).join('')}</tr>`).join('');
+  $('#accTable').innerHTML = `<table>${head}${rows}<tr><th colspan="${P.length + 1}">Accuracy by phase</th></tr>${phases}</table>`;
+  // accuracy across rallies (rolling mean of 3 rallies)
+  const roll = arr => arr.map((_, i) => { const w = arr.slice(Math.max(0, i - 2), i + 1).filter(Number.isFinite); return w.length ? w.reduce((a, b) => a + b, 0) / w.length : NaN; });
+  drawLineChart($('#accChart'), $('#accTip'), {
+    series: P.map((p, k) => ({ label: p.label, color: playerColor(P, k), values: roll(R.perPlayer[k].byRally) })),
+    xLabels: state.A.rallies.map(r => `Rally ${r.index + 1}`),
+    yFmt: v => `${v.toFixed(0)}%`,
+  });
+  $('#accLegend').innerHTML = `${P.map((p, k) => `<span><i style="background:${playerColor(P, k)}"></i>${esc(p.label)}</span>`).join('')}<span class="muted">accuracy across the match (3-rally average)</span>`;
+}
+
+$('#accTable').addEventListener('click', e => {
+  const a = e.target.closest('[data-cls]'); if (!a) return;
+  e.preventDefault();
+  const k = +a.dataset.slot, cls = a.dataset.cls;
+  const items = state.R.review.filter(x => x.slot === k && x.cls === cls);
+  if (!items.length) return;
+  const name = clsInfo(cls).name;
+  startPlaylist(items.map((x, i) => ({ start: Math.max(0, x.t - 2.5), end: x.t + 2, label: `${state.match.players[k].label} — ${name} ${i + 1}/${items.length}: ${x.why.map(w => w.text).join('; ') || state.A.shots[x.j].type}` })));
+});
 
 // ---- findings
 $('#lensTabs').addEventListener('click', e => {
@@ -444,24 +516,192 @@ $('#btnHighlights').addEventListener('click', () => {
   startPlaylist(clips);
 });
 
-$('#btnExportReel').addEventListener('click', async () => {
+// ---- save analyzed video (overlays burned in)
+const ex = { running: false, cancel: false };
+const exForm = $('#exportForm');
+
+function exportSegments(range) {
+  const { A } = state;
+  if (range === 'all') {
+    const segs = state.match.cfg.segments;
+    return segs?.length ? segs.map((g, i) => ({ start: Math.max(g.start, A.T[0]), end: Math.min(g.end, A.T[A.N - 1]), label: segs.length > 1 ? `Game ${i + 1}` : undefined })).filter(g => g.end > g.start)
+      : [{ start: A.T[0], end: A.T[A.N - 1] }];
+  }
+  if (range === 'rallies') return A.rallies.map(r => ({ start: r.start, end: r.end, label: `Rally ${r.index + 1}` }));
+  if (range === 'highlights') return pickHighlights(A, state.match.cfg.myTeam);
+  const f = state.C.findings.find(x => x.id === state.selected);
+  return f ? f.clips.map((c, i) => ({ ...c, label: `${f.title} — ${f.who} (${i + 1}/${f.clips.length})`, finding: f })) : [];
+}
+
+function updateExportEstimate() {
+  const segs = exportSegments(exForm.range.value);
+  const fps = +exForm.fps.value;
+  const { width, height } = outputSize(state.match.video.w, state.match.video.h, +exForm.height.value);
+  const dur = totalDuration(segs);
+  const mb = (width * height * fps * 0.12 * dur) / 8 / 1e6;
+  const fin = state.C.findings.find(x => x.id === state.selected);
+  exForm.range.querySelector('[value=finding]').textContent = fin ? `Clips of “${fin.title}” (${fin.who})` : 'Clips of the selected finding (select one in the Coach panel)';
+  exForm.range.querySelector('[value=finding]').disabled = !fin;
+  $('#exEstimate').textContent = segs.length
+    ? `${segs.length} segment${segs.length > 1 ? 's' : ''} · ${fmtTime(dur)} of video · ${width}×${height} · ≈ ${mb < 1 ? '<1' : mb.toFixed(0)} MB. ${canEncodeMp4() ? 'Export runs frame by frame — roughly 1–3× the video length.' : 'Recording runs in real time.'}`
+    : 'Nothing to export for this selection.';
+  $('#exStart').disabled = !segs.length || ex.running;
+}
+
+$('#btnSaveVideo').addEventListener('click', () => {
   if (!videoReady()) return;
-  const clips = pickHighlights(state.A, state.match.cfg.myTeam);
-  if (!clips.length) { toast('No rallies detected yet.'); return; }
-  if (typeof MediaRecorder === 'undefined') { toast('This browser cannot record video.'); return; }
-  stopPlaylist();
-  const btn = $('#btnExportReel');
-  btn.disabled = true;
+  stopPlaylist(); video.pause();
+  $('#exFormat').textContent = canEncodeMp4()
+    ? `Saves an MP4 (H.264) with the analysis drawn on the video${canPickFile() ? ' — you choose where to save it.' : '.'} No audio.`
+    : 'This browser can’t encode MP4, so the video is recorded in real time as WebM. No audio.';
+  if (!state.selected) exForm.range.value = exForm.range.value === 'finding' ? 'rallies' : exForm.range.value;
+  $('#exProgressWrap').hidden = !ex.running;
+  updateExportEstimate();
+  $('#exportDlg').showModal();
+});
+exForm.addEventListener('change', updateExportEstimate);
+$('#exClose').addEventListener('click', () => {
+  if (ex.running) { ex.cancel = true; $('#exStatus').textContent = 'Stopping…'; return; }
+  $('#exportDlg').close();
+});
+$('#exportDlg').addEventListener('cancel', e => { if (ex.running) e.preventDefault(); });
+
+$('#exStart').addEventListener('click', async () => {
+  const segs = exportSegments(exForm.range.value);
+  if (!segs.length) return;
+  const o = Object.fromEntries(['skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes'].map(k => [k, exForm[k].checked]));
+  o.shot = o.hud;
+  const mp4 = canEncodeMp4();
+  const suffix = { all: 'full', rallies: 'rallies', highlights: 'highlights', finding: 'clips' }[exForm.range.value];
+  const name = `${state.match.name}-analysis-${suffix}.${mp4 ? 'mp4' : 'webm'}`.replace(/[\\/:*?"<>|]+/g, ' ');
+  let handle = null;
+  try { handle = await askSaveLocation(name, mp4); } catch (e) { if (e.name === 'AbortError') return; }
+  ex.running = true; ex.cancel = false;
+  $('#exStart').disabled = true; $('#exClose').textContent = 'Stop';
+  $('#exProgressWrap').hidden = false;
+  const t0 = performance.now();
   try {
-    const blob = await recordReel(video, clips, (ctx, w, h, clip) => {
-      ctx.drawImage(video, 0, 0, w, h);
-      drawOverlayLayer(ctx, w, h, video.currentTime);
-      drawLabel(ctx, clip.label, w / 2, 34, '#199e70');
-    }, p => { btn.textContent = `Recording ${(p * 100).toFixed(0)}%`; });
-    download(`${state.match.name}-highlights.webm`, blob);
-    toast('Highlight reel saved.');
-  } catch (e) { console.error(e); toast('Recording failed: ' + e.message); }
-  btn.disabled = false; btn.textContent = 'Export reel (.webm)';
+    const { blob, ext } = await exportVideo({
+      video, segments: segs, fps: +exForm.fps.value, height: +exForm.height.value, fileHandle: handle,
+      draw: (ctx, w, h, t, seg) => drawExportFrame(ctx, w, h, t, seg, o),
+      isCancelled: () => ex.cancel,
+      onProgress: p => {
+        const el = (performance.now() - t0) / 1000;
+        $('#exBar').style.width = `${(p * 100).toFixed(1)}%`;
+        $('#exStatus').textContent = `Rendering ${(p * 100).toFixed(0)}% · about ${fmtTime(el / Math.max(p, 1e-3) - el)} left`;
+      },
+    });
+    const finalName = ext === 'mp4' ? name : name.replace(/\.mp4$/, '.webm');
+    if (blob) download(finalName, blob); // fallback or no file picker
+    $('#exStatus').textContent = ex.cancel ? 'Stopped — the part rendered so far was saved.' : `Saved ${finalName}${ext !== 'mp4' && handle ? ' (MP4 encoder unavailable — saved as WebM to Downloads)' : ''}.`;
+    toast(ex.cancel ? 'Partial video saved.' : 'Analyzed video saved.');
+  } catch (e) {
+    console.error(e);
+    $('#exStatus').textContent = `Export failed: ${e.message}`;
+  }
+  ex.running = false;
+  $('#exClose').textContent = 'Close';
+  updateExportEstimate();
+});
+
+function wrapText(ctx, text, maxW) {
+  const words = text.split(' '), lines = [];
+  let line = '';
+  for (const wd of words) {
+    const test = line ? `${line} ${wd}` : wd;
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = wd; } else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function panel(ctx, x, y, w, h) {
+  ctx.fillStyle = 'rgba(17,18,20,0.78)';
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 8); ctx.fill();
+}
+
+/** One output frame for "Save analyzed video". */
+function drawExportFrame(ctx, w, h, t, seg, o) {
+  const { match, A, C } = state;
+  ctx.drawImage(video, 0, 0, w, h);
+  drawOverlayLayer(ctx, w, h, t, o);
+  const u = h / 720; // UI scale
+  const font = (px, wt = 500) => `${wt} ${Math.round(px * u)}px Inter, system-ui, sans-serif`;
+
+  // rally & shot info (top-left)
+  if (o.hud) {
+    const r = A.rallies.find(x => t >= x.start && t <= x.end);
+    const last = r ? r.shots.map(j => A.shots[j]).filter(s => s.t <= t + 0.05).pop() : null;
+    const lines = [`${match.name} · ${fmtTime(t)}`];
+    if (r) lines.push(`Rally ${r.index + 1} · shot ${last ? last.idx + 1 : 0}/${r.shots.length}${r.outcome?.winner ? ` · won by ${match.players.filter(p => p.team === r.outcome.winner).map(p => p.label).join(' & ')}` : ''}`);
+    if (last) lines.push(`${match.players[last.slot].label}: ${last.type} (${last.fh ? 'FH' : 'BH'})`);
+    ctx.font = font(15, 600);
+    const bw = Math.max(...lines.map(l => ctx.measureText(l).width)) + 24 * u;
+    panel(ctx, 12 * u, 12 * u, bw, (lines.length * 22 + 14) * u);
+    lines.forEach((l, i) => {
+      ctx.font = font(i ? 14 : 15, i ? 500 : 700);
+      ctx.fillStyle = i ? '#c3c2b7' : '#f0efec';
+      ctx.fillText(l, 24 * u, (34 + i * 22) * u);
+    });
+  }
+  // segment title (top-centre)
+  if (seg.label) { ctx.font = font(15, 600); drawLabel(ctx, seg.label, w / 2, 40 * u, '#199e70'); }
+
+  // mini court map (bottom-right)
+  if (o.minimap) {
+    const mh = h * 0.42, mw = (mh * 32) / 60;
+    const i = bisect(A.T, t);
+    drawTopDownAt(ctx, w - mw - 12 * u, h - mh - 12 * u, mw, mh, match.players.map((p, k) => {
+      const s = A.series[k], trail = [];
+      for (let j = Math.max(0, i - 15); j <= i; j++) if (Number.isFinite(s.x[j])) trail.push([s.x[j], s.y[j]]);
+      return { x: s.x[i], y: s.y[i], color: playerColor(match.players, k), label: p.label, trail };
+    }));
+  }
+
+  // coach note (bottom-left): the finding whose clip covers this moment
+  if (o.notes) {
+    const f = seg.finding || C.findings.find(fd => fd.clips.some(c => t >= c.start && t <= c.end));
+    if (f) {
+      const maxW = Math.min(w * 0.5, 560 * u);
+      ctx.font = font(13);
+      const body = wrapText(ctx, `${f.lens === 'fix' ? 'Fix' : 'Exploit'}: ${f.counter}`, maxW - 24 * u).slice(0, 3);
+      const bh = (46 + body.length * 18) * u;
+      const y0 = h - bh - 12 * u;
+      panel(ctx, 12 * u, y0, maxW, bh);
+      ctx.fillStyle = f.severity === 'high' ? '#e66767' : f.severity === 'medium' ? '#c98500' : '#8f8e86';
+      ctx.fillRect(12 * u, y0, 4 * u, bh);
+      ctx.font = font(15, 700); ctx.fillStyle = '#f0efec';
+      ctx.fillText(`${f.title} — ${f.who}`, 26 * u, y0 + 24 * u);
+      ctx.font = font(13); ctx.fillStyle = '#c3c2b7';
+      body.forEach((l, k) => ctx.fillText(l, 26 * u, y0 + (44 + k * 18) * u));
+    }
+  }
+  ctx.font = font(11); ctx.fillStyle = 'rgba(240,239,236,0.55)';
+  ctx.fillText('CourtSense', w - 80 * u, 22 * u);
+}
+
+// ---- keep the original video inside the app (IndexedDB)
+async function refreshStoreButton() {
+  const btn = $('#btnStoreVideo');
+  if (!state.match) return;
+  const stored = await hasVideo(state.match.id).catch(() => false);
+  btn.textContent = stored ? '✓ Video kept in app' : 'Keep video in app';
+  btn.title = stored ? 'Click to remove the stored copy and free space' : 'Store the video with this analysis so it reopens without re-attaching';
+  btn.dataset.stored = stored ? '1' : '';
+}
+$('#btnStoreVideo').addEventListener('click', async () => {
+  const btn = $('#btnStoreVideo');
+  const id = state.match.id;
+  if (btn.dataset.stored) {
+    if (!confirm('Remove the stored copy of this video from the app? The analysis itself is kept.')) return;
+    await deleteVideo(id); toast('Stored video removed.');
+  } else {
+    if (!state.file || !video.src) { toast('Attach the video first.'); return; }
+    btn.disabled = true; btn.textContent = 'Saving video…';
+    try { await saveVideo(id, state.file); toast('Video kept in the app.'); } catch (e) { toast(e.message, 5000); }
+    btn.disabled = false;
+  }
+  refreshStoreButton();
 });
 
 $('#btnExportJson').addEventListener('click', () => {
@@ -509,23 +749,25 @@ function poseAt(k, t) {
   return near ? near.p[k] : null;
 }
 
-function drawOverlayLayer(ctx, w, h, t) {
+const viewOverlayOpts = () => ({ court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true });
+
+function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
   const { match, A } = state;
-  if ($('#tCourt').checked) drawCourtOverlay(ctx, match.cal, w, h);
+  if (o.court) drawCourtOverlay(ctx, match.cal, w, h);
   const lw = Math.max(2, w / 500);
   match.players.forEach((p, k) => {
     const pose = poseAt(k, t);
     if (!pose) return;
     const color = playerColor(match.players, k);
-    if ($('#tSkel').checked) drawSkeleton(ctx, pose.lm, w, h, color, lw);
-    if ($('#tLabels').checked) {
+    if (o.skel) drawSkeleton(ctx, pose.lm, w, h, color, lw);
+    if (o.labels) {
       const nx = pose.lm[L.nose * 3] * w, ny = pose.lm[L.nose * 3 + 1] * h;
       const zone = Number.isFinite(pose.cy) ? ` · ${fmt(Math.max(0, distToNet(pose.cy) - 7), 0)} ft to NVZ` : '';
       drawLabel(ctx, `${p.label}${zone}`, nx, ny - 8, color);
     }
   });
   // shot flash
-  const sh = A.shots.find(s => Math.abs(s.t - t) < 0.2);
+  const sh = o.shot ? A.shots.find(s => Math.abs(s.t - t) < 0.2) : null;
   if (sh) {
     const pose = poseAt(sh.slot, t);
     if (pose) {
@@ -538,7 +780,7 @@ function drawOverlayLayer(ctx, w, h, t) {
     }
   }
   // ball trail
-  if ($('#tBall').checked) {
+  if (o.ball) {
     const S = match.samples, T = A.T;
     const i = bisect(T, t);
     for (let j = Math.max(0, i - 4); j <= i; j++) {
@@ -639,6 +881,13 @@ function renderShotInspector() {
       <tr><th>Position</th><td>${esc(sh.zone)} · ${fmt(Math.max(0, sh.d - 7), 1)} ft behind NVZ line</td></tr>
       <tr><th>At contact</th><td>knee ${fmt(s.knee[i], 0)}° · elbow ${fmt(elbow[i], 0)}° · paddle ${dy > 0.05 ? 'below' : 'above'} hips · reach ${fmt(sh.reach, 1)}× shoulders</td></tr>
       <tr><th>Swing speed</th><td>${fmt(sh.speed, 1)} torso-lengths/s (${fmt(sh.rel, 2)}× their median)</td></tr>
+      ${(() => {
+        const rv = state.R.review.find(x => x.j === A.shots.indexOf(sh));
+        if (!rv) return '';
+        const c = clsInfo(rv.cls);
+        return `<tr><th>Rating</th><td>${symHtml(c)}<b>${c.name}</b> · ${rv.score}/100
+          <ul class="why">${rv.why.map(w => `<li class="${w.d >= 0 ? 'pos' : 'neg'}">${w.d >= 0 ? '+' : ''}${w.d} ${esc(w.text)}</li>`).join('') || '<li>Neutral shot</li>'}</ul></td></tr>`;
+      })()}
     </table>`;
   const T = A.T;
   const lo = bisect(T, sh.t - 1.5), hi = bisect(T, sh.t + 1.5);
@@ -782,7 +1031,7 @@ $('#statBody').addEventListener('change', e => {
   saveTimer = setTimeout(() => {
     recompute();
     $('#coachSummary').innerHTML = state.C.summary;
-    renderFindings(); drawTimelineNow();
+    renderFindings(); renderReview(); drawTimelineNow();
     persist();
   }, 400);
 });
@@ -947,6 +1196,12 @@ function renderReport() {
         <div class="kpi"><b>${C.labeled}</b><span>rallies labeled</span></div>
         ${me >= 0 ? KEY_METRICS.slice(0, 4).map(k => `<div class="kpi"><b>${k.f(k.get(A.metrics[me]))}</b><span>${esc(k.label)} (${esc(P[me].label)})</span></div>`).join('') : ''}
       </div>
+      <h2>Game review — accuracy</h2>
+      <table><tr><th></th>${P.map(p => `<th class="num">${esc(p.label)}</th>`).join('')}</tr>
+        <tr><td><b>Accuracy</b></td>${state.R.perPlayer.map(pp => `<td class="num"><b>${Number.isFinite(pp.accuracy) ? pp.accuracy.toFixed(1) + '%' : '–'}</b></td>`).join('')}</tr>
+        ${CLASSES.map(c => `<tr><td>${symHtml(c)}${c.name}</td>${state.R.perPlayer.map(pp => `<td class="num">${pp.counts[c.id]}</td>`).join('')}</tr>`).join('')}
+        ${PHASES.map(ph => `<tr><td class="muted">${ph.name}</td>${state.R.perPlayer.map(pp => `<td class="num muted">${Number.isFinite(pp.byPhase[ph.id]) ? pp.byPhase[ph.id].toFixed(0) + '%' : '–'}</td>`).join('')}</tr>`).join('')}
+      </table>
       <h2>Coach summary</h2><p>${C.summary}</p>
       <h2>Fix my game</h2>${fix.slice(0, 6).map(fcard).join('') || '<p class="muted">Nothing above target.</p>'}
       <h2>Opportunities against the opponents</h2>${exp.slice(0, 6).map(fcard).join('') || '<p class="muted">No clear weaknesses detected.</p>'}
@@ -1030,6 +1285,8 @@ function renderDrills() {
 $('#drillFilter').addEventListener('change', renderDrills);
 
 // ------------------------------------------------------------------ boot
+window.addEventListener('error', e => toast(`Error: ${e.message}`, 8000));
+window.addEventListener('unhandledrejection', e => toast(`Error: ${e.reason?.message || e.reason}`, 8000));
 (async () => {
   const link = location.hash.match(/open=([\w-]+)/);
   const view = location.hash.match(/view=(\w+)/)?.[1];

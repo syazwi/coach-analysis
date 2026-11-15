@@ -90,6 +90,20 @@ export function drawCourtDiagram(ctx, w, h) {
 
 export function drawTopDown(canvas, entries) {
   const { ctx, w, h } = fitCanvas(canvas);
+  drawTopDownInto(ctx, w, h, entries);
+}
+
+/** Mini court map drawn into a region of another canvas (used for burned-in video exports). */
+export function drawTopDownAt(ctx, x, y, w, h, entries) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath(); ctx.roundRect(0, 0, w, h, 8); ctx.clip();
+  ctx.globalAlpha = 0.92;
+  drawTopDownInto(ctx, w, h, entries);
+  ctx.restore();
+}
+
+function drawTopDownInto(ctx, w, h, entries) {
   const map = drawCourtDiagram(ctx, w, h);
   for (const e of entries) {
     if (!Number.isFinite(e.x)) continue;

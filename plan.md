@@ -395,6 +395,9 @@ The development machine has no NVIDIA GPU, Python or Node, so the GPU pipeline (
 | Report + PDF (print), dashboard trends, compare matches | ✅ |
 | Drill library, weekly training plan, highlights playlist, .webm reel export | ✅ (extra features) |
 | Persistence (IndexedDB) + JSON export/import | ✅ |
+| Game time: start/end, multiple games, motion-scan suggestions; processing skips the rest | ✅ |
+| Game review: per-shot ratings (Brilliant → Blunder), accuracy % per player/phase/rally | ✅ heuristic; tune weights with coach feedback |
+| Save analyzed video (MP4 with overlays, mini-map, coach notes; WebM fallback) + keep video in app | ✅ (MP4 path not verified headless — needs GPU browser) |
 | LLM coaching narrative | ⏳ template-based for now; Claude API needs a backend for the key |
 | Python FastAPI + GPU workers, 3D pose, TrackNet ball, paddle model | ⏳ Phase 1–3 |
 | Coach marketplace, audio score tracking | ⏳ backlog |

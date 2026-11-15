@@ -20,7 +20,8 @@ You need an internet connection the first time, because the MediaPipe pose model
 
 ## How to use
 
-1. **New analysis**: drop a video, **or paste a link** (YouTube, Vimeo or a direct .mp4) and click *Import*. Then set the format (singles/doubles), skill level and which side your team is on. Optionally trim the start and end. Keep teams on the same ends; if they switch sides, analyze each part separately.
+1. **New analysis**: drop a video, **or paste a link** (YouTube, Vimeo or a direct .mp4) and click *Import*. Then set the format (singles/doubles), skill level and which side your team is on.
+   - **Game time**: play the video and press *Set game start* and *Set game end* so only real play is analyzed. Use *Split / add another game* to skip breaks between games. *Suggest from motion* quickly scans the video and proposes play segments for you to check. The panel shows how much time is skipped and estimates the processing time. If teams switch ends, analyze each part separately.
 2. **Court calibration**: click the 4 outer court corners (far-left, far-right, near-right, near-left), then check that the projected lines sit on the real court lines.
 3. **Player calibration**: on a frame where everyone is visible, the app detects the players and suggests who is who. Select each name and click the right skeleton, or click a player's feet if they weren't detected. Each player's starting position and **shirt color** are saved. The tracker uses them so labels stay on the right person when partners cross or someone is briefly hidden.
 4. **Ball calibration**: click the ball on 1–3 frames (sun and shade, near and far) and set the ring to the ball's size. The magnifier helps you click precisely. **Test detection** shows what the detector finds on the current frame. Detection then uses your ball's color and size instead of a generic yellow/green guess. You can also skip ball tracking.
@@ -32,7 +33,10 @@ You need an internet connection the first time, because the MediaPipe pose model
    - Live top-down court view, heatmaps, shot inspector (joint angles at contact) and stats tabs
    If the labels ever jump to the wrong person, pause at that moment and use *Players & settings → Fix an identity switch*.
 7. **Label rally outcomes** (in the *Rallies & outcomes* tab). This unlocks error analysis and ranks findings by points lost.
-8. **Report** (printable, can be saved as PDF), **Training plan** (7 days, built from your top findings), **Compare** (progress between matches), **Drills** library, a **Highlights** playlist, and **Export reel** (.webm).
+8. **Game review (accuracy)**: like a chess engine's game review. Every shot is rated **Brilliant !! / Great ! / Good ✓ / Inaccuracy ?! / Mistake ? / Blunder ??** and each player gets an **accuracy %**, also broken down by phase (serve & return, 3rd shot, transition, kitchen) and shown as a graph across the match. Click a count to replay those shots. The shot inspector explains each rating (e.g. "+12 attacked a low paddle", "−18 attackable ball").
+9. **Save analyzed video**: saves an MP4 with skeletons, court, ball trail, labels, a mini court map, rally/shot info and coach notes drawn onto the video. You can export the whole match, rallies only (no dead time), highlights, or one finding's clips, at 720p, 1080p or source resolution. In Chrome and Edge it's encoded frame by frame with WebCodecs and saved where you choose. If the encoder isn't available, it falls back to WebM recorded in real time.
+10. **Keep video in app**: stores the original video with the analysis (IndexedDB), so a saved match reopens without re-attaching. This is on by default for new analyses.
+11. **Report** (printable, can be saved as PDF), **Training plan** (7 days, built from your top findings), **Compare** (progress between matches), **Drills** library, a **Highlights** playlist, and **Export reel** (.webm).
 
 Analyses are saved in the browser (IndexedDB). Use *Export data* / *Import analysis* to move them between machines.
 
@@ -86,7 +90,11 @@ app/
   js/drills.js      drill library
   js/render.js      overlays, court view, heatmap, timeline, charts
   js/db.js          IndexedDB + JSON import/export
-  js/highlights.js  highlight playlist + .webm reel recording
+  js/accuracy.js    shot ratings + accuracy % (game review)
+  js/trim.js        game time: start/end, multiple games, motion scan
+  js/exporter.js    save analyzed video (WebCodecs H.264 -> MP4, WebM fallback)
+  vendor/mp4-muxer.mjs  MP4 muxer (MIT, bundled for offline use)
+  js/highlights.js  highlight playlist + real-time recording fallback
   js/importer.js    import video from a link (via the local server + yt-dlp)
   tests/selftest.html  synthetic-data tests for analysis + coach
 serve.ps1, start.bat   zero-install local server (Windows) + link-import API
