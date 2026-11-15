@@ -13,6 +13,21 @@ export function playerColor(players, k) {
   return PLAYER_COLORS[p.team][sameTeam % 2];
 }
 
+/** Ring + "P" marker on the paddle hand (hand = 'L' | 'R'). */
+export function drawPaddleHand(ctx, lm, w, h, hand, color) {
+  const j = hand === 'L' ? 15 : 16;
+  if (lm[j * 3 + 2] < 0.2) return;
+  // centre of the hand: average of wrist, index and pinky
+  const pts = [j, j + 2, j + 4].filter(i => lm[i * 3 + 2] >= 0.2);
+  const x = pts.reduce((s, i) => s + lm[i * 3], 0) / pts.length * w;
+  const y = pts.reduce((s, i) => s + lm[i * 3 + 1], 0) / pts.length * h;
+  const r = Math.max(6, w / 180);
+  ctx.strokeStyle = '#eedd33'; ctx.lineWidth = Math.max(2, w / 600);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = color; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x, y, r + 2, 0, Math.PI * 2); ctx.stroke();
+}
+
 /** lm: Float32Array 33*3 normalized. */
 export function drawSkeleton(ctx, lm, w, h, color, lineW = 2.5) {
   ctx.strokeStyle = color;
@@ -26,10 +41,10 @@ export function drawSkeleton(ctx, lm, w, h, color, lineW = 2.5) {
   }
   ctx.stroke();
   ctx.fillStyle = color;
-  for (const j of [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28]) {
+  for (const j of [0, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]) {
     if (lm[j * 3 + 2] < 0.25) continue;
     ctx.beginPath();
-    ctx.arc(lm[j * 3] * w, lm[j * 3 + 1] * h, j === 0 ? lineW * 1.8 : lineW * 1.1, 0, Math.PI * 2);
+    ctx.arc(lm[j * 3] * w, lm[j * 3 + 1] * h, j === 0 ? lineW * 1.8 : j > 18 && j < 23 ? lineW * 0.7 : lineW * 1.1, 0, Math.PI * 2);
     ctx.fill();
   }
 }

@@ -57,7 +57,7 @@ export function ballConfigFromSamples(samples) {
  * (colour + size) when available, otherwise a generic yellow/green heuristic.
  */
 export class BallDetector {
-  constructor(vw, vh, cal, ballCal = null) {
+  constructor(vw, vh, cal, ballCal = null, area = { side: 10, back: 16 }) {
     this.bc = ballCal;
     let w = 480;
     if (ballCal?.d) w = Math.min(960, Math.max(480, Math.ceil((4 * vw) / ballCal.d))); // ball >= ~4 px wide
@@ -68,7 +68,8 @@ export class BallDetector {
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     this.prev = null;
     this.track = [];
-    const b = imgBox(cal, [[-6, -10], [26, -10], [26, 54], [-6, 54]]);
+    const s = Math.max(6, area.side), bk = Math.max(10, area.back);
+    const b = imgBox(cal, [[-s, -bk], [20 + s, -bk], [20 + s, 44 + bk], [-s, 44 + bk]]);
     const h = b.y1 - b.y0;
     this.roi = { x0: Math.max(0, b.x0), x1: Math.min(1, b.x1), y0: Math.max(0, b.y0 - h * 0.6), y1: Math.min(1, b.y1) };
     if (ballCal?.d) {

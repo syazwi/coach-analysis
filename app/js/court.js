@@ -49,7 +49,34 @@ export function makeCalibration(imgPts) {
   return { imgPts, toCourt: solveH(imgPts, COURT_CORNERS), toImg: solveH(COURT_CORNERS, imgPts) };
 }
 
-export const distToNet = y => Math.abs(y - COURT.NET);
+// How far outside the lines players can be and still be tracked (feet beyond sidelines / baselines).
+// Many courts have 7–10 ft behind the baseline and players retreat further for lobs/deep serves.
+export const AREA_PRESETS = {
+  standard: { side: 10, back: 16 },
+  wide: { side: 16, back: 24 },
+  xwide: { side: 25, back: 35 },
+};
+// Players are not limited to an area: anywhere on the ground plane in view (bounded only to reject
+// mapping garbage near the horizon). Spectators are handled by the tracker, not by a fence.
+export const UNLIMITED = { side: 60, back: 80 };
+export const CROP_MAX = AREA_PRESETS.xwide; // crops stop growing here to keep far players at a useful resolution
+export const areaOf = cfg => cfg?.playArea || UNLIMITED;
+export const inArea = (cx, cy, a) => Number.isFinite(cx) && cx > -a.side && cx < COURT.W + a.side && cy > -a.back && cy < COURT.L + a.back;
+/** Feet outside the court for a point (0 if inside): [beyond sideline, beyond baseline]. */
+export const outside = (cx, cy) => [Math.max(0, -cx, cx - COURT.W), Math.max(0, -cy, cy - COURT.L)];
+
+const hw = (H, x, y) => H[6] * x + H[7] * y + H[8];
+
+/** Image point (normalized) -> court feet, or null when the point is above the horizon (not on the ground plane). */
+export function imageToCourt(cal, x, y) {
+  const [rx, ry] = applyH(cal.toImg, 10, 22);
+  if (hw(cal.toCourt, x, y) * hw(cal.toCourt, rx, ry) <= 0) return null;
+  const p = applyH(cal.toCourt, x, y);
+  return Number.isFinite(p[0]) && Math.abs(p[0]) < 1000 && Math.abs(p[1]) < 1000 ? p : null;
+}
+
+const distToNetImpl = y => Math.abs(y - COURT.NET);
+export const distToNet = distToNetImpl;
 export function zoneOf(y) {
   const d = distToNet(y);
   return d <= 10 ? 'kitchen' : d < 18 ? 'transition' : 'baseline';
@@ -61,21 +88,34 @@ function bboxOf(pts) {
   return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
 }
 
-/** Image bbox (normalized) of a court-space polygon. */
+/**
+ * Image bbox (normalized) of a court-space polygon. Points that would project beyond the
+ * horizon (far behind a low camera) are replaced by the top edge of the frame.
+ */
 export function imgBox(cal, courtPts) {
-  return bboxOf(courtPts.map(([x, y]) => applyH(cal.toImg, x, y)));
+  const ref = hw(cal.toImg, 10, 22);
+  const valid = [], clampTop = courtPts.some(([x, y]) => hw(cal.toImg, x, y) * ref <= 0);
+  for (const [x, y] of courtPts) {
+    if (hw(cal.toImg, x, y) * ref <= 0) continue;
+    const [u, v] = applyH(cal.toImg, x, y);
+    valid.push([Math.max(-1, Math.min(2, u)), Math.max(-1, Math.min(2, v))]);
+  }
+  const b = valid.length ? bboxOf(valid) : { x0: 0, x1: 1, y0: 0, y1: 1 };
+  if (clampTop) { b.y0 = Math.min(b.y0, 0); b.x0 = Math.min(b.x0, 0); b.x1 = Math.max(b.x1, 1); }
+  return b;
 }
 
 /**
  * Two crop regions (pixels) so far-side players are seen at higher resolution.
- * Each region covers one half of the court plus space for standing bodies.
+ * Each region covers one half of the court plus the player area around it.
  */
-export function cropRegions(cal, vw, vh) {
-  const far = imgBox(cal, [[-4, -8], [24, -8], [24, 23], [-4, 23]]);
-  const near = imgBox(cal, [[-4, 21], [24, 21], [24, 52], [-4, 52]]);
+export function cropRegions(cal, vw, vh, area = AREA_PRESETS.standard) {
+  const s = area.side, bk = area.back;
+  const far = imgBox(cal, [[-s, -bk], [20 + s, -bk], [20 + s, 23], [-s, 23]]);
+  const near = imgBox(cal, [[-s, 21], [20 + s, 21], [20 + s, 44 + bk], [-s, 44 + bk]]);
   const mk = (b, upFrac, downFrac) => {
     const h = b.y1 - b.y0, w = b.x1 - b.x0;
-    const x0 = Math.max(0, b.x0 - w * 0.08), x1 = Math.min(1, b.x1 + w * 0.08);
+    const x0 = Math.max(0, b.x0 - w * 0.04), x1 = Math.min(1, b.x1 + w * 0.04);
     const y0 = Math.max(0, b.y0 - h * upFrac), y1 = Math.min(1, b.y1 + h * downFrac);
     return { sx: Math.round(x0 * vw), sy: Math.round(y0 * vh), sw: Math.round((x1 - x0) * vw), sh: Math.round((y1 - y0) * vh) };
   };

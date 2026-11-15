@@ -189,8 +189,9 @@ export function analyze(match) {
     for (let i = bisect(T, r.start); i < N && T[i] <= r.end; i++) if (T[i] >= r.start) inRally[i] = r.index;
   });
 
-  // ---- handedness (majority paddle wrist)
+  // ---- handedness: calibrated paddle hand, else majority paddle wrist from swings
   const handed = series.map((s, k) => {
+    if (players[k].hand === 'L' || players[k].hand === 'R') return players[k].hand;
     const mine = finalShots.filter(sh => sh.slot === k);
     const right = mine.filter(sh => sh.wrist === 1).length;
     return mine.length ? (right >= mine.length / 2 ? 'R' : 'L') : 'R';

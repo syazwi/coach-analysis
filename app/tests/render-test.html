@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>CourtSense render test</title>
+<style>body{background:#111214;color:#f0efec;font:13px system-ui;margin:12px}</style></head>
+<body><p>Skeleton with hands (wrist, thumb, index, pinky) — paddle hand ringed: left player = right hand, right player = left hand.</p>
+<canvas id="c" width="640" height="360" style="background:#1f2a26;border-radius:8px"></canvas>
+<script type="module">
+import { drawSkeleton, drawPaddleHand } from '../js/render.js';
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+function person(cx) {
+  const lm = new Float32Array(99);
+  const set = (i, x, y) => { lm[i * 3] = (cx + x) / 640; lm[i * 3 + 1] = y / 360; lm[i * 3 + 2] = 0.95; };
+  set(0, 0, 60); set(11, -30, 100); set(12, 30, 100); set(13, -45, 150); set(14, 55, 135);
+  set(15, -50, 195); set(16, 85, 120);                       // wrists
+  set(17, -56, 210); set(19, -48, 214); set(21, -40, 205);   // left hand: pinky, index, thumb
+  set(18, 98, 112); set(20, 100, 120); set(22, 92, 128);     // right hand
+  set(23, -20, 200); set(24, 20, 200); set(25, -25, 260); set(26, 25, 260);
+  set(27, -28, 320); set(28, 28, 320); set(29, -30, 328); set(30, 30, 328); set(31, -20, 332); set(32, 20, 332);
+  return lm;
+}
+const a = person(200), b = person(440);
+drawSkeleton(ctx, a, 640, 360, '#3987e5', 3); drawPaddleHand(ctx, a, 640, 360, 'R', '#3987e5');
+drawSkeleton(ctx, b, 640, 360, '#d95926', 3); drawPaddleHand(ctx, b, 640, 360, 'L', '#d95926');
+document.title = 'DONE';
+</script></body></html>

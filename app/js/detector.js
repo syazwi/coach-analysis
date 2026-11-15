@@ -2,15 +2,17 @@
 // detections with court position and shirt colour. Used by player calibration (IMAGE mode)
 // and by processing (VIDEO mode).
 import { createLandmarker } from './pose.js';
-import { cropRegions } from './court.js';
+import { cropRegions, UNLIMITED, CROP_MAX } from './court.js';
 import { toDetection, filterDetections, torsoColor } from './tracking.js';
 
 export class FrameDetector {
-  static async create({ model, crops, nPlayers, cal, vw, vh, mode = 'VIDEO' }) {
+  static async create({ model, crops, nPlayers, cal, vw, vh, mode = 'VIDEO', area = UNLIMITED }) {
     const d = new FrameDetector();
-    d.cal = cal; d.vw = vw; d.vh = vh; d.mode = mode;
-    d.regions = crops ? cropRegions(cal, vw, vh) : [{ sx: 0, sy: 0, sw: vw, sh: vh }];
-    const perRegion = crops ? 3 : Math.min(6, nPlayers + 2);
+    d.cal = cal; d.vw = vw; d.vh = vh; d.mode = mode; d.area = area;
+    const cropArea = { side: Math.min(area.side, CROP_MAX.side), back: Math.min(area.back, CROP_MAX.back) };
+    d.regions = crops ? cropRegions(cal, vw, vh, cropArea) : [{ sx: 0, sy: 0, sw: vw, sh: vh }];
+    // a wide view can contain extra people (other courts, spectators): allow more poses per crop
+    const perRegion = crops ? 5 : Math.min(8, nPlayers + 4);
     d.landmarkers = [];
     for (let i = 0; i < d.regions.length; i++) d.landmarkers.push(await createLandmarker(model, perRegion, mode));
     d.canvases = d.regions.map(r => {
@@ -37,7 +39,7 @@ export class FrameDetector {
       const res = this.mode === 'IMAGE' ? this.landmarkers[k].detect(c) : this.landmarkers[k].detectForVideo(c, ts);
       for (const pose of res.landmarks || []) dets.push(toDetection(pose, r, this.vw, this.vh, this.cal));
     });
-    const kept = filterDetections(dets);
+    const kept = filterDetections(dets, this.area);
     if (kept.length) {
       const { app, appCtx } = this;
       appCtx.drawImage(video, 0, 0, app.width, app.height);

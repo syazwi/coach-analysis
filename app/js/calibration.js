@@ -1,6 +1,7 @@
 // Player & ball calibration steps of "New analysis".
 import { $, clamp, esc, fmtTime, seekVideo, toast } from './util.js';
-import { applyH, sideOf, COURT } from './court.js';
+import { applyH, sideOf, COURT, imageToCourt, UNLIMITED, outside, inArea } from './court.js';
+import { L } from './pose.js';
 import { FrameDetector } from './detector.js';
 import { colorDist } from './tracking.js';
 import { BallDetector, sampleBallColor, ballConfigFromSamples } from './ball.js';
@@ -14,7 +15,9 @@ const hsv2rgb = (h, s, v) => {
 
 export function setupCalibration({ video, getDraft, setStep, onReady }) {
   // ================================================================ players
-  const pc = { dets: [], assign: [], active: 0, detector: null, busy: false, t: 0, scale: 1 };
+  const pc = { dets: [], assign: [], hands: [], active: 0, detector: null, busy: false, t: 0, scale: 1 };
+  const HANDS = { L: L.lw, R: L.rw };
+  const wristPos = (det, side) => [det.lm[HANDS[side] * 3], det.lm[HANDS[side] * 3 + 1], det.lm[HANDS[side] * 3 + 2]];
   const plCanvas = $('#plCanvas');
 
   function drawFrame(canvas) {
@@ -76,15 +79,17 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     pc.busy = true;
     const d = getDraft();
     try {
+      if (pc.detector && pc.detCal !== d.cal) { pc.detector.close(); pc.detector = null; } // court was re-calibrated
       if (!pc.detector) {
         $('#plHint').textContent = 'Loading pose model…';
-        pc.detector = await FrameDetector.create({ model: d.cfg.model, crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE' });
+        pc.detector = await FrameDetector.create({ model: d.cfg.model, crops: d.cfg.crops, nPlayers: d.players.length, cal: d.cal, vw: video.videoWidth, vh: video.videoHeight, mode: 'IMAGE', area: UNLIMITED });
+        pc.detCal = d.cal;
       }
       pc.dets = pc.detector.detect(video);
       pc.t = video.currentTime;
       pc.assign = autoAssign(pc.dets);
       const found = pc.assign.filter(Boolean).length;
-      $('#plHint').innerHTML = `Detected <b>${pc.dets.length}</b> people on court; <b>${found}/${d.players.length}</b> players matched. Check each name sits on the right person — select a player on the right, then click their skeleton (or their feet if no skeleton).`;
+      $('#plHint').innerHTML = `Detected <b>${pc.dets.length}</b> people (on or around the court); <b>${found}/${d.players.length}</b> players matched. Check each name sits on the right person — select a player on the right, then click their skeleton (or their feet if no skeleton). Then click a player’s <b>L</b>/<b>R</b> hand marker to set their paddle hand (or leave it on Auto).`;
       pc.active = Math.max(0, pc.assign.findIndex(a => !a));
     } catch (e) {
       console.error(e);
@@ -113,25 +118,47 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
         drawSkeleton(ctx, a.lm, w, h, color, si === pc.active ? 4 : 3);
         const b = bbox(a);
         drawLabel(ctx, label, ((b.x0 + b.x1) / 2) * w, b.y0 * h - 6, color);
+        // hands: L / R markers, paddle hand highlighted (click a hand to set it)
+        for (const side of ['L', 'R']) {
+          const [hx, hy, hv] = wristPos(a, side);
+          if (hv < 0.2) continue;
+          const paddle = pc.hands[si] === side;
+          ctx.fillStyle = paddle ? '#eedd33' : 'rgba(17,18,20,0.85)';
+          ctx.strokeStyle = color; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(hx * w, hy * h, paddle ? 10 : 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.fillStyle = paddle ? '#111214' : '#f0efec';
+          ctx.font = '700 10px Inter, system-ui, sans-serif'; ctx.textAlign = 'center';
+          ctx.fillText(side, hx * w, hy * h + 3.5); ctx.textAlign = 'left';
+        }
       }
     });
     $('#plSlots').innerHTML = d.players.map((p, si) => {
       const a = pc.assign[si];
       const status = !a ? '<span style="color:var(--sev-high)">not identified</span>'
         : a.manual ? 'manual position (no shirt colour)'
-        : `shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span> · ${fmtFeet(a.cy)}`;
+        : `shirt <span class="swatch" style="background:${rgbCss(a.color)}"></span> · ${fmtFeet(a.cy, a.cx)}`;
       return `<div class="slot ${si === pc.active ? 'active' : ''}" data-si="${si}">
         <i style="background:${playerColor(d.players, si)}"></i>
         <input data-label="${si}" value="${esc(p.label)}" aria-label="Player name">
         <span class="chip">${p.team === 'A' ? 'near' : 'far'}</span>
         <div class="meta">${status}${a ? ` <a href="#" data-clear="${si}">clear</a>` : ''}</div>
+        <div class="meta hand-pick">Paddle hand:
+          ${[['auto', 'Auto'], ['L', 'Left'], ['R', 'Right']].map(([v, t]) => `<button type="button" class="${(pc.hands[si] || 'auto') === v ? 'on' : ''}" data-hand="${v}" data-si="${si}">${t}</button>`).join('')}
+        </div>
       </div>`;
     }).join('');
     $('#plTime').textContent = fmtTime(video.currentTime);
   }
-  const fmtFeet = cy => `${Math.max(0, Math.abs(cy - COURT.NET) - COURT.NVZ).toFixed(0)} ft behind NVZ`;
+  const fmtFeet = (cy, cx) => {
+    const [os, ob] = outside(cx, cy);
+    if (ob > 0.5) return `${ob.toFixed(0)} ft behind the baseline`;
+    if (os > 0.5) return `${os.toFixed(0)} ft outside the sideline`;
+    return `${Math.max(0, Math.abs(cy - COURT.NET) - COURT.NVZ).toFixed(0)} ft behind NVZ`;
+  };
 
   $('#plSlots').addEventListener('click', e => {
+    const hb = e.target.closest('[data-hand]');
+    if (hb) { const si = +hb.dataset.si; pc.hands[si] = hb.dataset.hand === 'auto' ? null : hb.dataset.hand; pc.active = si; renderPlayers(); return; }
     const clr = e.target.closest('[data-clear]');
     if (clr) { e.preventDefault(); pc.assign[+clr.dataset.clear] = null; pc.active = +clr.dataset.clear; renderPlayers(); return; }
     const s = e.target.closest('.slot');
@@ -151,6 +178,21 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     const d = getDraft();
     const r = plCanvas.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+    // clicking a hand of an identified player marks it as that player's paddle hand
+    for (let k = 0; k < pc.assign.length; k++) {
+      const a = pc.assign[k];
+      if (!a || a.manual) continue;
+      for (const side of ['L', 'R']) {
+        const [hx, hy, hv] = wristPos(a, side);
+        if (hv < 0.2) continue;
+        if (Math.hypot((x - hx) * r.width, (y - hy) * r.height) <= 12) {
+          pc.hands[k] = side; pc.active = k;
+          toast(`${d.players[k].label}: paddle in the ${side === 'L' ? 'left' : 'right'} hand.`);
+          renderPlayers();
+          return;
+        }
+      }
+    }
     const si = pc.active;
     const p = d.players[si];
     // hit-test detected skeletons
@@ -165,9 +207,13 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
     let entry;
     if (hit) entry = hit;
     else {
-      const [cx, cy] = applyH(d.cal.toCourt, x, y);
-      if (!(cx > -8 && cx < 28 && cy > -14 && cy < 58)) { toast('That point is outside the court area.'); return; }
-      entry = { manual: true, cx, cy, color: null };
+      // manual placement: any point on the ground plane is fine, even well outside the lines
+      const p = imageToCourt(d.cal, x, y);
+      if (!p || !inArea(p[0], p[1], { side: 60, back: 80 })) {
+        toast('Click on the player’s feet (on the ground). That point is above the horizon or too far away to map onto the court.', 5000);
+        return;
+      }
+      entry = { manual: true, cx: p[0], cy: p[1], color: null };
     }
     if (sideOf(entry.cy) !== teamSide(p.team)) {
       toast(`${p.label} is on the ${teamSide(p.team)} team, but that person is on the ${sideOf(entry.cy)} side. Change “Your team” in step 1 if sides are swapped.`, 5000);
@@ -199,12 +245,15 @@ export function setupCalibration({ video, getDraft, setStep, onReady }) {
       p.seed = a ? { cx: +a.cx.toFixed(2), cy: +a.cy.toFixed(2), t: +pc.t.toFixed(2) } : null;
       p.color = a?.color || null;
     });
+    d.players.forEach((p, si) => { p.hand = pc.hands[si] || null; }); // null = detect from swings
+    d.cfg.playArea = UNLIMITED; // players are followed wherever they move
     if (d.cfg.ball) startBall(); else onReady();
   });
 
   async function startPlayers() {
     const d = getDraft();
     pc.assign = d.players.map(() => null);
+    pc.hands = d.players.map(p => p.hand || null);
     pc.dets = [];
     const s = $('#plScrub');
     s.max = video.duration;

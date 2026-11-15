@@ -1,12 +1,12 @@
 import { $, $$, bisect, clamp, esc, fmt, fmtPct, fmtTime, median, toast, uid, fitCanvas, seekVideo, loadVideoMeta, download } from './util.js';
-import { makeCalibration, applyH, COURT_LINES, distToNet } from './court.js';
+import { makeCalibration, applyH, COURT_LINES, distToNet, UNLIMITED } from './court.js';
 import { processVideo } from './processor.js';
 import { analyze } from './analysis.js';
 import { coach, buildPlan } from './coach.js';
 import { DRILLS, FOCUS_LIST } from './drills.js';
 import { saveMatch, getMatch, listSummaries, deleteMatch, matchToJSON, matchFromJSON, saveVideo, getVideo, hasVideo, deleteVideo } from './db.js';
 import { exportVideo, askSaveLocation, canEncodeMp4, canPickFile, outputSize, totalDuration } from './exporter.js';
-import { drawSkeleton, drawCourtOverlay, drawLabel, drawTopDown, drawTopDownAt,drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
+import { drawSkeleton, drawPaddleHand, drawCourtOverlay, drawLabel, drawTopDown, drawTopDownAt, drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
 import { importFromLink } from './importer.js';
@@ -174,6 +174,7 @@ $('#toCalibrate').addEventListener('click', async () => {
       fps: +fd.get('fps'), model: fd.get('model'),
       crops: fd.get('crops') === 'on', ball: fd.get('ball') === 'on', keepVideo: fd.get('keepVideo') === 'on',
       segments: trim.getSegments(),
+      playArea: UNLIMITED, // players are followed wherever they move
       sensitivity: 3.5,
     },
     players,
@@ -759,7 +760,7 @@ function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
     const pose = poseAt(k, t);
     if (!pose) return;
     const color = playerColor(match.players, k);
-    if (o.skel) drawSkeleton(ctx, pose.lm, w, h, color, lw);
+    if (o.skel) { drawSkeleton(ctx, pose.lm, w, h, color, lw); drawPaddleHand(ctx, pose.lm, w, h, A.handed[k], color); }
     if (o.labels) {
       const nx = pose.lm[L.nose * 3] * w, ny = pose.lm[L.nose * 3 + 1] * h;
       const zone = Number.isFinite(pose.cy) ? ` · ${fmt(Math.max(0, distToNet(pose.cy) - 7), 0)} ft to NVZ` : '';
@@ -1045,7 +1046,9 @@ $('#btnSettings').addEventListener('click', () => {
     <label>Your team <select name="myTeam"><option value="A" ${match.cfg.myTeam === 'A' ? 'selected' : ''}>Near side</option><option value="B" ${match.cfg.myTeam === 'B' ? 'selected' : ''}>Far side</option></select></label>
     <h3>Players <span class="muted small">(name · “me”)</span></h3>
     ${P.map((p, k) => `<div class="player-edit-row"><i style="background:${playerColor(P, k)}"></i>
-      <input name="label${k}" value="${esc(p.label)}"> <label class="check"><input type="radio" name="me" value="${k}" ${p.isMe ? 'checked' : ''}> me</label></div>`).join('')}
+      <input name="label${k}" value="${esc(p.label)}">
+      <select name="hand${k}" title="Paddle hand"><option value="">Hand: auto (${state.A.handed[k] === "L" ? "left" : "right"})</option><option value="R" ${p.hand === "R" ? "selected" : ""}>Right hand</option><option value="L" ${p.hand === "L" ? "selected" : ""}>Left hand</option></select>
+      <label class="check"><input type="radio" name="me" value="${k}" ${p.isMe ? 'checked' : ''}> me</label></div>`).join('')}
     <button type="button" class="btn small ghost" id="swapBtn">Swap names within each team</button>
     <h3>Fix an identity switch <span class="muted small">(tracker swapped two players)</span></h3>
     <p class="muted small">Pause the video at the moment the labels jumped to the wrong person, then swap from that time onward.</p>
@@ -1081,7 +1084,7 @@ $('#settingsDlg').addEventListener('close', () => {
   if ($('#settingsDlg').returnValue !== 'save') return;
   const form = $('#settingsForm');
   const { match } = state;
-  match.players.forEach((p, k) => { p.label = form[`label${k}`].value || p.label; p.isMe = form.me.value === String(k); });
+  match.players.forEach((p, k) => { p.label = form[`label${k}`].value || p.label; p.isMe = form.me.value === String(k); p.hand = form[`hand${k}`].value || null; });
   match.cfg.skill = form.skill.value;
   match.cfg.myTeam = form.myTeam.value;
   match.cfg.sensitivity = +form.sensitivity.value;

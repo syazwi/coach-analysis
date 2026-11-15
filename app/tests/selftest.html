@@ -100,6 +100,24 @@ try {
   const json = matchToJSON(match);
   const back2 = matchFromJSON(json);
   check('json round-trip', back2.samples[5].p[0].lm instanceof Float32Array && back2.samples.length === samples.length, `${(json.length / 1e6).toFixed(1)} MB`);
+  // ---- players outside the court lines
+  const courtMod = await import('../js/court.js');
+  const { filterDetections } = await import('../js/tracking.js');
+  const fake = (cx, cy) => ({ cx, cy, conf: 0.9, lm: new Float32Array(99) });
+  const outsideDets = [fake(10, 62), fake(-14, 30), fake(10, 30)]; // 18 ft behind baseline, 14 ft outside sideline, on court
+  check('standard area drops far-out players', filterDetections(outsideDets, courtMod.AREA_PRESETS.standard).length === 1);
+  check('wide area keeps players outside the lines', filterDetections(outsideDets, courtMod.AREA_PRESETS.xwide).length === 3);
+  check('default (no limit) keeps everyone on the ground', filterDetections([...outsideDets, fake(40, 90)]).length === 4);
+  match.players[0].hand = 'L';
+  const Ahand = analyze(match);
+  check('calibrated paddle hand overrides detection', Ahand.handed[0] === 'L' && Ahand.handed[1] === 'R', Ahand.handed.join(''));
+  delete match.players[0].hand;
+  const above = courtMod.imageToCourt(cal, 0.5, 0.05); // above the far baseline, near the horizon / sky
+  const feet = courtMod.imageToCourt(cal, 0.5, 0.97);  // just below the near baseline
+  check('ground-plane check', feet && feet[1] > 44 && (above === null || above[1] < -20), `feet → y=${feet?.[1].toFixed(1)} ft; top of frame → ${above ? 'y=' + above[1].toFixed(0) + ' ft' : 'not on ground'}`);
+  const regs = courtMod.cropRegions(cal, 1920, 1080, courtMod.AREA_PRESETS.xwide);
+  check('crop regions valid for very wide area', regs.length === 2 && regs.every(r => r.sx >= 0 && r.sy >= 0 && r.sx + r.sw <= 1920 && r.sy + r.sh <= 1080 && r.sw > 100 && r.sh > 50), regs.map(r => `${r.sw}x${r.sh}`).join(', '));
+
   // ---- accuracy (game review)
   const { computeAccuracy } = await import('../js/accuracy.js');
   const R = computeAccuracy(match, A);

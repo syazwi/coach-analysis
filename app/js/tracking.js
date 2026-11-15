@@ -1,4 +1,8 @@
-import { applyH, sideOf } from './court.js';
+import { imageToCourt, sideOf, inArea, UNLIMITED, outside } from './court.js';
+
+// Re-acquiring a lost player prefers people near the court over spectators far away
+// (ft of cost per ft beyond 10 ft outside the lines). Tracked players are never fenced in.
+const farPenalty = d => { const [os, ob] = outside(d.cx, d.cy); return 0.6 * (Math.max(0, os - 10) + Math.max(0, ob - 16)); };
 import { L } from './pose.js';
 
 /** Convert raw MediaPipe landmarks from a crop into a detection in full-frame normalized coords. */
@@ -15,12 +19,14 @@ export function toDetection(landmarks, region, vw, vh, cal) {
   // ground contact point = midpoint of ankles/heels
   const gx = (lm[L.la * 3] + lm[L.ra * 3] + lm[L.lheel * 3] + lm[L.rheel * 3]) / 4;
   const gy = Math.max(lm[L.lheel * 3 + 1], lm[L.rheel * 3 + 1], lm[L.la * 3 + 1], lm[L.ra * 3 + 1]);
-  const [cx, cy] = applyH(cal.toCourt, gx, gy);
+  const p = imageToCourt(cal, gx, gy);
+  const [cx, cy] = p || [NaN, NaN];
   return { lm, cx, cy, conf: visSum / 6 };
 }
 
-export function filterDetections(dets) {
-  const inside = dets.filter(d => Number.isFinite(d.cx) && d.cx > -7 && d.cx < 27 && d.cy > -12 && d.cy < 56 && d.conf > 0.3);
+/** Keep confident detections whose feet are inside the player area; drop duplicates from overlapping crops. */
+export function filterDetections(dets, area = UNLIMITED) {
+  const inside = dets.filter(d => inArea(d.cx, d.cy, area) && d.conf > 0.3);
   inside.sort((a, b) => b.conf - a.conf);
   const kept = [];
   for (const d of inside) {
@@ -85,7 +91,7 @@ export class Tracker {
     this.firstT ??= t;
     const pairs = [];
     this.slots.forEach((s, si) => dets.forEach((d, di) => {
-      if (sideOf(d.cy) === s.side) pairs.push({ si, di, c: this.cost(s, d, 0.3) });
+      if (sideOf(d.cy) === s.side) pairs.push({ si, di, c: this.cost(s, d, 0.3) + farPenalty(d) });
     }));
     pairs.sort((a, b) => a.c - b.c);
     const usedS = new Set(), usedD = new Set();
@@ -150,7 +156,7 @@ export class Tracker {
       let best = -1, bd = Infinity;
       dets.forEach((d, di) => {
         if (usedD.has(di) || sideOf(d.cy) !== s.side) return;
-        const c = this.cost(s, d, 0.2); // after a gap, appearance matters more than position
+        const c = this.cost(s, d, 0.2) + farPenalty(d); // after a gap, appearance matters more than position
         if (c < bd) { bd = c; best = di; }
       });
       if (best >= 0) { usedS.add(si); usedD.add(best); out[si] = dets[best]; }
