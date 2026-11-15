@@ -8,6 +8,7 @@ import { saveMatch, getMatch, listSummaries, deleteMatch, matchToJSON, matchFrom
 import { drawSkeleton, drawCourtOverlay, drawLabel, drawTopDown, drawHeatmap, drawTimeline, drawLineChart, playerColor, TEAM_COLORS, BALL_COLOR } from './render.js';
 import { pickHighlights, recordReel } from './highlights.js';
 import { L } from './pose.js';
+import { importFromLink } from './importer.js';
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -84,6 +85,7 @@ async function setVideoFile(file) {
 $('#videoInput').addEventListener('change', async e => {
   const f = e.target.files[0];
   if (f) await pickVideo(f);
+  e.target.value = '';
 });
 const dz = $('#dropzone');
 dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
@@ -94,7 +96,39 @@ dz.addEventListener('drop', async e => {
   if (f && f.type.startsWith('video')) await pickVideo(f);
 });
 
-async function pickVideo(f) {
+// ---- import from link (YouTube etc.)
+const linkStatusText = s => {
+  const title = s.title ? `“${s.title}” — ` : '';
+  if (s.stage === 'download') return `${title}downloading on the local server… ${fmt(s.progress, 0)}%`;
+  return `${title}loading into the browser… ${fmt(s.progress, 0)}%`;
+};
+async function runLinkImport(url, { onFile, statusEl, progEl, button }) {
+  button.disabled = true;
+  progEl.hidden = false;
+  statusEl.textContent = 'Starting import… (the first import also downloads the yt-dlp helper)';
+  try {
+    const file = await importFromLink(url, s => {
+      statusEl.textContent = linkStatusText(s);
+      progEl.firstElementChild.style.width = `${s.progress || 0}%`;
+    });
+    await onFile(file);
+    statusEl.textContent = `Imported: ${file.name} (${(file.size / 1e6).toFixed(0)} MB)`;
+  } catch (e) {
+    statusEl.textContent = e.message;
+    toast(e.message, 5000);
+  } finally {
+    button.disabled = false;
+    progEl.hidden = true;
+  }
+}
+$('#linkBtn').addEventListener('click', () => {
+  const url = $('#linkInput').value;
+  runLinkImport(url, { onFile: f => pickVideo(f, url.trim()), statusEl: $('#linkStatus'), progEl: $('#linkProg'), button: $('#linkBtn') });
+});
+$('#linkInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('#linkBtn').click(); });
+
+async function pickVideo(f, sourceUrl = null) {
+  state.sourceUrl = sourceUrl;
   $('#videoInfo').textContent = 'Loading…';
   if (!(await setVideoFile(f))) { $('#videoInfo').textContent = 'Could not open this video.'; return; }
   const v = procVideo;
@@ -196,7 +230,7 @@ $('#calConfirm').addEventListener('click', async () => {
   let cal;
   try { cal = makeCalibration(state.calPts); } catch { toast('Those points do not form a court — reset and try again.'); return; }
   state.draft.cal = cal;
-  state.draft.video = { name: state.file.name, size: state.file.size, duration: procVideo.duration, w: procVideo.videoWidth, h: procVideo.videoHeight };
+  state.draft.video = { name: state.file.name, size: state.file.size, duration: procVideo.duration, w: procVideo.videoWidth, h: procVideo.videoHeight, sourceUrl: state.sourceUrl || null };
   setStep(3);
   await runProcessing();
 });
@@ -280,6 +314,8 @@ async function openMatch(match, isNew = false) {
   } else {
     video.removeAttribute('src'); video.load();
     $('#attachVideo').hidden = false;
+    $('#reimportBtn').hidden = !v.sourceUrl;
+    $('#attachNote').textContent = v.sourceUrl ? `Pick the same file, or re-import from ${v.sourceUrl}` : 'Pick the same file you analyzed.';
   }
   $('#playerWrap').style.aspectRatio = `${v.w} / ${v.h}`;
 }
@@ -292,6 +328,21 @@ $('#attachInput').addEventListener('change', async e => {
   await loadVideoMeta(video, state.fileURL).catch(err => toast(err.message));
   $('#attachVideo').hidden = true;
   renderAnalysis();
+});
+
+$('#reimportBtn').addEventListener('click', () => {
+  const url = state.match?.video.sourceUrl;
+  if (!url) return;
+  const prog = document.createElement('div'); prog.className = 'progress slim'; prog.innerHTML = '<div></div>';
+  runLinkImport(url, {
+    onFile: async f => {
+      if (!(await setVideoFile(f))) return;
+      await loadVideoMeta(video, state.fileURL);
+      $('#attachVideo').hidden = true;
+      renderAnalysis();
+    },
+    statusEl: $('#attachNote'), progEl: prog, button: $('#reimportBtn'),
+  });
 });
 
 // ------------------------------------------------------------------ analysis view
@@ -959,5 +1010,5 @@ $('#drillFilter').addEventListener('change', renderDrills);
     const m = await getMatch(link[1]).catch(() => null);
     if (m) { await openMatch(m); show(view || 'analysis'); return; }
   }
-  show('dashboard');
+  show(view && $(`#view-${view}`) ? view : 'dashboard');
 })();

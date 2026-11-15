@@ -60,7 +60,7 @@ main { padding: 20px; max-width: 1500px; margin: 0 auto; }
 .btn.small { padding: 4px 8px; font-size: 12px; }
 .btn.icon { padding: 5px 10px; }
 
-select, input[type=text], input[type=number], input:not([type]) { background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
+select, input[type=text], input[type=number], input[type=url], input:not([type]) { background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; }
 .form { display: flex; flex-direction: column; gap: 12px; }
 .form label { display: flex; flex-direction: column; gap: 4px; color: var(--text-secondary); font-size: 12px; }
 .form label.check { flex-direction: row; align-items: center; gap: 8px; font-size: 13px; }
@@ -80,6 +80,12 @@ details { display: flex; flex-direction: column; gap: 10px; }
 .dropzone { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 32px; border: 2px dashed var(--border); border-radius: var(--radius); cursor: pointer; text-align: center; }
 .dropzone:hover, .dropzone.drag { border-color: var(--accent); }
 .dz-icon { font-size: 28px; color: var(--accent); }
+.link-import { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.link-import .or { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: 12px; }
+.link-import .or::before, .link-import .or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.link-row { display: flex; gap: 8px; }
+.link-row input { flex: 1; min-width: 0; }
+.progress.slim { height: 4px; margin: 0; }
 .tips ul { margin: 0; padding-left: 18px; color: var(--text-secondary); }
 
 .cal-wrap { position: relative; width: 100%; background: #000; border-radius: 8px; overflow: hidden; }

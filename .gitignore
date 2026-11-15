@@ -9,3 +9,7 @@
 Thumbs.db
 .DS_Store
 .vscode/
+
+# link imports (yt-dlp downloads) and helper binaries
+downloads/
+tools/

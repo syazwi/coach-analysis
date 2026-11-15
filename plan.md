@@ -382,6 +382,7 @@ The development machine has no NVIDIA GPU, Python or Node, so the GPU pipeline (
 | Area | Status |
 |---|---|
 | Upload, court calibration (4 corners + homography), trim range | ✅ |
+| Import from link (YouTube/Vimeo/direct URL) via local server + yt-dlp, re-import for saved matches | ✅ (live YouTube download not yet tested) |
 | Pose estimation (MediaPipe, two-pass crops for far players), player identity tracking | ✅ |
 | Ball tracking | ⚠️ experimental (color + motion), used for the overlay only |
 | Shot detection (wrist-swing peaks + team alternation), rallies, shot types, FH/BH, handedness | ✅ approximate |

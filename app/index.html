@@ -69,6 +69,15 @@
             <div><b>Drop a match video here</b> or click to browse</div>
             <div class="muted small" id="videoInfo">MP4 / MOV / WebM. The video stays on your computer.</div>
           </label>
+          <div class="link-import">
+            <div class="or"><span>or import from a link</span></div>
+            <div class="link-row">
+              <input id="linkInput" type="url" placeholder="https://www.youtube.com/watch?v=…  (YouTube, Vimeo, direct .mp4)">
+              <button type="button" class="btn" id="linkBtn">Import</button>
+            </div>
+            <div class="progress slim" id="linkProg" hidden><div></div></div>
+            <div class="muted small" id="linkStatus">Only import videos you own or have permission to analyze.</div>
+          </div>
           <div class="tips">
             <h3>Recording tips</h3>
             <ul>
@@ -159,7 +168,8 @@
       </div>
       <div id="attachVideo" class="banner" hidden>
         Video not loaded. <label class="btn primary small">Attach video file<input type="file" id="attachInput" accept="video/*" hidden></label>
-        <span class="muted small">Pick the same file you analyzed.</span>
+        <button class="btn small ghost" id="reimportBtn" hidden>Re-import from link</button>
+        <span class="muted small" id="attachNote">Pick the same file you analyzed.</span>
       </div>
 
       <div class="analysis-grid">

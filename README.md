@@ -20,7 +20,7 @@ You need an internet connection the first time, because the MediaPipe pose model
 
 ## How to use
 
-1. **New analysis**: drop a video, then set the format (singles/doubles), skill level and which side your team is on. Optionally trim the start and end. Keep teams on the same ends; if they switch sides, analyze each part separately.
+1. **New analysis**: drop a video, **or paste a link** (YouTube, Vimeo or a direct .mp4) and click *Import*. Then set the format (singles/doubles), skill level and which side your team is on. Optionally trim the start and end. Keep teams on the same ends; if they switch sides, analyze each part separately.
 2. **Calibrate**: click the 4 outer court corners (far-left, far-right, near-right, near-left), then check that the projected lines sit on the real court lines.
 3. **Processing**: pose estimation runs frame by frame, with a live preview. Expect roughly 1–3× the video length at 10 fps on a laptop.
 4. **Match analysis**:
@@ -32,6 +32,14 @@ You need an internet connection the first time, because the MediaPipe pose model
 6. **Report** (printable, can be saved as PDF), **Training plan** (7 days, built from your top findings), **Compare** (progress between matches), **Drills** library, a **Highlights** playlist, and **Export reel** (.webm).
 
 Analyses are saved in the browser (IndexedDB). Use *Export data* / *Import analysis* to move them between machines.
+
+### Importing from a link
+A browser can't read the pixels of an embedded YouTube player, so the local server downloads the video first using [yt-dlp](https://github.com/yt-dlp/yt-dlp). The browser then analyzes it like a normal file.
+- The first import automatically downloads `yt-dlp.exe` into `tools/`. Downloaded videos are kept in `downloads/` (both folders are git-ignored), so re-opening the same link is instant.
+- The server picks a browser-playable H.264 MP4 up to 1080p, video only, so ffmpeg is not needed.
+- Saved matches remember their source link, so *Match analysis → Re-import from link* can reload the video later.
+- Link import needs the bundled server (`start.bat`). With any other static server, only direct video links that allow cross-origin access will work.
+- Only import videos you own or have permission to analyze, and respect the platform's terms of service.
 
 ### Recording tips
 - Camera **behind the baseline, raised 2–3 m**, centered, with the whole court in frame.
@@ -73,8 +81,9 @@ app/
   js/render.js      overlays, court view, heatmap, timeline, charts
   js/db.js          IndexedDB + JSON import/export
   js/highlights.js  highlight playlist + .webm reel recording
+  js/importer.js    import video from a link (via the local server + yt-dlp)
   tests/selftest.html  synthetic-data tests for analysis + coach
-serve.ps1, start.bat   zero-install local server (Windows)
+serve.ps1, start.bat   zero-install local server (Windows) + link-import API
 plan.md                product & technical plan
 ```
 
