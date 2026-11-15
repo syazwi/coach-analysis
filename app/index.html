@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CourtSense — Pickleball Coach</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header class="topbar no-print">
+  <div class="brand"><span class="logo">◉</span> CourtSense <small>pickleball coach</small></div>
+  <nav id="nav">
+    <button data-view="dashboard" class="active">Dashboard</button>
+    <button data-view="new">New analysis</button>
+    <button data-view="analysis">Match analysis</button>
+    <button data-view="report">Report</button>
+    <button data-view="plan">Training plan</button>
+    <button data-view="compare">Compare</button>
+    <button data-view="drills">Drills</button>
+  </nav>
+</header>
+
+<main>
+  <!-- DASHBOARD -->
+  <section id="view-dashboard" class="view active">
+    <div class="row-head">
+      <h1>Dashboard</h1>
+      <div class="actions">
+        <label class="btn ghost">Import analysis (.json)<input type="file" id="importJson" accept=".json" hidden></label>
+        <button class="btn primary" data-goto="new">+ Analyze a match</button>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h2>Focus areas <small>from your latest match</small></h2>
+        <div id="focusAreas" class="muted">No matches analyzed yet.</div>
+      </div>
+      <div class="card">
+        <div class="row-head small">
+          <h2>Progress</h2>
+          <select id="trendMetric"></select>
+        </div>
+        <div class="chart-wrap"><canvas id="trendChart" height="220"></canvas><div class="tooltip" id="trendTip"></div></div>
+        <p class="muted small" id="trendNote"></p>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Matches</h2>
+      <div id="matchList" class="match-list"></div>
+    </div>
+  </section>
+
+  <!-- NEW ANALYSIS -->
+  <section id="view-new" class="view">
+    <h1>New analysis</h1>
+    <ol class="steps" id="steps">
+      <li data-step="1" class="active">Video & setup</li>
+      <li data-step="2">Court calibration</li>
+      <li data-step="3">Processing</li>
+    </ol>
+
+    <div class="step-pane active" data-pane="1">
+      <div class="grid-2">
+        <div class="card">
+          <h2>1. Choose video</h2>
+          <label class="dropzone" id="dropzone">
+            <input type="file" id="videoInput" accept="video/*" hidden>
+            <div class="dz-icon">⬆</div>
+            <div><b>Drop a match video here</b> or click to browse</div>
+            <div class="muted small" id="videoInfo">MP4 / MOV / WebM. The video stays on your computer.</div>
+          </label>
+          <div class="tips">
+            <h3>Recording tips</h3>
+            <ul>
+              <li>Film from <b>behind the baseline, raised 2–3 m</b>, centered, whole court in frame.</li>
+              <li><b>60 fps, 1080p</b>, tripod or fence mount — no hand-held.</li>
+              <li>Keep teams on the same ends (trim with start/end if they switch sides).</li>
+            </ul>
+          </div>
+        </div>
+        <div class="card">
+          <h2>2. Match details</h2>
+          <form id="setupForm" class="form">
+            <label>Match name <input name="name" placeholder="Sunday doubles vs. Club"></label>
+            <div class="form-row">
+              <label>Format
+                <select name="format"><option value="doubles">Doubles</option><option value="singles">Singles</option></select>
+              </label>
+              <label>Skill level
+                <select name="skill"><option>3.0</option><option selected>3.5</option><option>4.0</option><option>4.5</option></select>
+              </label>
+            </div>
+            <label>Your team is on the
+              <select name="myTeam"><option value="A">near side (closest to camera)</option><option value="B">far side</option></select>
+            </label>
+            <div class="form-row">
+              <label>Start (s) <input name="rangeStart" type="number" min="0" step="1" value="0"></label>
+              <label>End (s) <input name="rangeEnd" type="number" min="0" step="1" placeholder="end"></label>
+            </div>
+            <details>
+              <summary>Analysis settings</summary>
+              <div class="form-row">
+                <label>Analysis rate
+                  <select name="fps"><option value="5">5 fps (fastest)</option><option value="10" selected>10 fps (balanced)</option><option value="15">15 fps (more accurate)</option><option value="20">20 fps (slow)</option></select>
+                </label>
+                <label>Pose model
+                  <select name="model"><option value="lite" selected>Lite (fast)</option><option value="full">Full (accurate)</option><option value="heavy">Heavy (slowest)</option></select>
+                </label>
+              </div>
+              <label class="check"><input type="checkbox" name="crops" checked> Two-pass crops (better for far-side players)</label>
+              <label class="check"><input type="checkbox" name="ball" checked> Ball tracking (experimental)</label>
+            </details>
+            <button type="button" class="btn primary" id="toCalibrate" disabled>Next: calibrate court →</button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="step-pane" data-pane="2">
+      <div class="card">
+        <div class="row-head small">
+          <h2>Click the 4 court corners</h2>
+          <div class="actions">
+            <button class="btn ghost" id="calReset">Reset points</button>
+            <button class="btn primary" id="calConfirm" disabled>Start analysis →</button>
+          </div>
+        </div>
+        <p class="muted" id="calHint">Click in order: <b>1 far-left</b>, <b>2 far-right</b>, <b>3 near-right</b>, <b>4 near-left</b> (outer baseline/sideline corners). Drag points to adjust.</p>
+        <div class="cal-wrap"><canvas id="calCanvas"></canvas></div>
+        <label class="scrub">Frame <input type="range" id="calScrub" min="0" max="100" step="0.1" value="0"> <span id="calTime">0:00</span></label>
+      </div>
+    </div>
+
+    <div class="step-pane" data-pane="3">
+      <div class="card">
+        <div class="row-head small">
+          <h2>Analyzing…</h2>
+          <button class="btn ghost" id="cancelProc">Cancel</button>
+        </div>
+        <div class="progress"><div id="procBar"></div></div>
+        <p id="procStatus" class="muted">Loading pose model…</p>
+        <div class="cal-wrap"><canvas id="procCanvas"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ANALYSIS -->
+  <section id="view-analysis" class="view">
+    <div id="noMatch" class="card empty">Open a match from the dashboard or start a new analysis.</div>
+    <div id="analysisRoot" hidden>
+      <div class="row-head">
+        <h1 id="matchTitle">Match</h1>
+        <div class="actions">
+          <button class="btn ghost" id="btnHighlights">▶ Highlights</button>
+          <button class="btn ghost" id="btnExportReel">Export reel (.webm)</button>
+          <button class="btn ghost" id="btnExportJson">Export data</button>
+          <button class="btn ghost" id="btnSettings">Players & settings</button>
+        </div>
+      </div>
+      <div id="attachVideo" class="banner" hidden>
+        Video not loaded. <label class="btn primary small">Attach video file<input type="file" id="attachInput" accept="video/*" hidden></label>
+        <span class="muted small">Pick the same file you analyzed.</span>
+      </div>
+
+      <div class="analysis-grid">
+        <div class="player-col">
+          <div class="player-wrap" id="playerWrap">
+            <video id="video" playsinline preload="auto"></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="controls">
+            <button class="btn icon" id="btnBack" title="Back one step">⏮</button>
+            <button class="btn icon" id="btnPlay" title="Play/pause (space)">▶</button>
+            <button class="btn icon" id="btnFwd" title="Forward one step">⏭</button>
+            <span id="timeLabel" class="mono">0:00 / 0:00</span>
+            <span class="sep"></span>
+            <span class="speed">
+              <button data-rate="0.25">¼×</button><button data-rate="0.5">½×</button><button data-rate="1" class="active">1×</button><button data-rate="2">2×</button>
+            </span>
+            <span class="sep"></span>
+            <label class="toggle"><input type="checkbox" id="tSkel" checked> Skeleton</label>
+            <label class="toggle"><input type="checkbox" id="tBall" checked> Ball</label>
+            <label class="toggle"><input type="checkbox" id="tCourt" checked> Court</label>
+            <label class="toggle"><input type="checkbox" id="tLabels" checked> Labels</label>
+          </div>
+          <div class="playlist-bar" id="playlistBar" hidden>
+            <span id="playlistLabel"></span>
+            <button class="btn small ghost" id="plPrev">◀ Prev</button>
+            <button class="btn small ghost" id="plNext">Next ▶</button>
+            <button class="btn small ghost" id="plStop">✕ Stop</button>
+          </div>
+          <div class="timeline-wrap"><canvas id="timeline" height="64"></canvas><div class="tooltip" id="tlTip"></div></div>
+          <div class="legend small" id="tlLegend"></div>
+        </div>
+
+        <aside class="coach-col card">
+          <h2>Coach</h2>
+          <p id="coachSummary" class="summary"></p>
+          <div class="tabs" id="lensTabs">
+            <button data-lens="all" class="active">All</button>
+            <button data-lens="fix">Fix my game</button>
+            <button data-lens="exploit">Exploit opponents</button>
+          </div>
+          <div id="findings" class="findings"></div>
+        </aside>
+      </div>
+
+      <div class="grid-3">
+        <div class="card">
+          <h2>Court view <small>live</small></h2>
+          <canvas id="topdown" class="court-canvas"></canvas>
+          <div class="legend small" id="playerLegend"></div>
+        </div>
+        <div class="card">
+          <div class="row-head small">
+            <h2>Heatmap</h2>
+            <div class="actions">
+              <select id="heatPlayer"></select>
+              <select id="heatMode"><option value="pos">Positions (in rally)</option><option value="contact">Contact points</option></select>
+            </div>
+          </div>
+          <canvas id="heatmap" class="court-canvas"></canvas>
+        </div>
+        <div class="card">
+          <h2>Shot inspector</h2>
+          <div id="shotInspector" class="muted">Click a shot tick on the timeline or a shot in the list.</div>
+          <div class="chart-wrap"><canvas id="angleChart" height="150"></canvas><div class="tooltip" id="angleTip"></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="tabs" id="statTabs">
+          <button data-tab="overview" class="active">Overview</button>
+          <button data-tab="shots">Shots</button>
+          <button data-tab="movement">Movement</button>
+          <button data-tab="team">Team</button>
+          <button data-tab="rallies">Rallies & outcomes</button>
+        </div>
+        <div id="statBody"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REPORT -->
+  <section id="view-report" class="view">
+    <div class="row-head no-print">
+      <h1>Report</h1>
+      <button class="btn primary" onclick="window.print()">Print / save as PDF</button>
+    </div>
+    <div id="reportBody" class="report"><div class="card empty">Open a match first.</div></div>
+  </section>
+
+  <!-- PLAN -->
+  <section id="view-plan" class="view">
+    <h1>Weekly training plan</h1>
+    <div id="planBody"><div class="card empty">Open a match first — the plan is built from your top findings.</div></div>
+  </section>
+
+  <!-- COMPARE -->
+  <section id="view-compare" class="view">
+    <h1>Compare matches</h1>
+    <div class="card">
+      <div class="form-row">
+        <label>Match A <select id="cmpA"></select></label>
+        <label>Match B <select id="cmpB"></select></label>
+      </div>
+      <div id="cmpBody" class="muted">Pick two analyzed matches. Metrics are for the player marked “me”.</div>
+    </div>
+  </section>
+
+  <!-- DRILLS -->
+  <section id="view-drills" class="view">
+    <div class="row-head"><h1>Drill library</h1><select id="drillFilter"></select></div>
+    <div id="drillGrid" class="drill-grid"></div>
+  </section>
+</main>
+
+<!-- Settings dialog -->
+<dialog id="settingsDlg">
+  <form method="dialog" class="form" id="settingsForm">
+    <h2>Players & settings</h2>
+    <div id="playerEdit"></div>
+    <label>Shot detection sensitivity <input type="range" name="sensitivity" min="1.5" max="8" step="0.25"> <span id="sensVal"></span></label>
+    <p class="muted small">Lower = detects softer shots (dinks) but more false swings. Changes apply instantly.</p>
+    <div class="actions">
+      <button class="btn ghost" value="cancel">Close</button>
+      <button class="btn primary" value="save" id="saveSettings">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast"></div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

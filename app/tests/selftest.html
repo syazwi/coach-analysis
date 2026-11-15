@@ -1,0 +1,118 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>CourtSense self-test</title></head>
+<body><pre id="out">running…</pre>
+<script type="module">
+import { makeCalibration, applyH } from '../js/court.js';
+import { analyze } from '../js/analysis.js';
+import { coach, buildPlan } from '../js/coach.js';
+import { matchToJSON, matchFromJSON } from '../js/db.js';
+
+const out = document.getElementById('out');
+const log = [];
+const check = (name, ok, info = '') => log.push(`${ok ? 'PASS' : 'FAIL'} ${name}${info ? ' — ' + info : ''}`);
+
+try {
+  // camera behind near baseline: far court appears narrow at the top
+  const cal = makeCalibration([[0.38, 0.30], [0.62, 0.30], [0.85, 0.92], [0.15, 0.92]]);
+  const back = applyH(cal.toCourt, 0.15, 0.92);
+  check('homography round-trip', Math.abs(back[0] - 0) < 1e-6 && Math.abs(back[1] - 44) < 1e-6, back.map(v => v.toFixed(3)).join(','));
+
+  const players = [
+    { team: 'A', label: 'Me', isMe: true }, { team: 'A', label: 'Partner' },
+    { team: 'B', label: 'Opp 1' }, { team: 'B', label: 'Opp 2' },
+  ];
+  const fps = 10, dur = 150;
+  // shot schedule: rallies every 18 s; 9 shots alternating teams, 1.6 s apart
+  const shots = [];
+  for (let r0 = 2; r0 < dur - 18; r0 += 18) {
+    for (let n = 0; n < 9; n++) {
+      const team = n % 2 === 0 ? 'A' : 'B';
+      const slot = team === 'A' ? (n % 4 === 0 ? 0 : 1) : (n % 4 === 1 ? 2 : 3);
+      shots.push({ t: r0 + n * 1.6, slot, r0 });
+    }
+  }
+  // positions: "Me" (slot 0) is slow to the kitchen; opponents get there fast
+  function pos(k, t) {
+    const r = shots.filter(s => s.t <= t + 0.01).pop();
+    const r0 = r ? r.r0 : 0, dt = t - r0;
+    const x = [5, 15, 5, 15][k] + Math.sin(t * 0.7 + k) * 1.5;
+    let d; // distance from net
+    if (k < 2) d = dt < 3.6 ? 21 : Math.max(8, 21 - (dt - 3.6) * (k === 0 ? 2.2 : 6)); // serving team
+    else d = k === 2 ? (dt < 1.6 ? 21 : Math.max(8, 21 - (dt - 1.6) * 9)) : 8;
+    if (dt > 16) d = 21;
+    const y = k < 2 ? 22 + d : 22 - d;
+    return [x, y];
+  }
+  function landmarks(k, t) {
+    const [x, y] = pos(k, t);
+    const [fx, fy] = applyH(cal.toImg, x, y);
+    const h = 0.10 + 0.14 * (y / 44); // apparent height
+    const lm = new Float32Array(99);
+    const set = (i, dx, dy) => { lm[i * 3] = fx + dx * h; lm[i * 3 + 1] = fy - dy * h; lm[i * 3 + 2] = 0.95; };
+    const kneeBend = k === 0 ? 0.0 : 0.06; // "Me" stands tall
+    set(0, 0, 0.95); set(11, -0.12, 0.8); set(12, 0.12, 0.8);
+    set(13, -0.18, 0.62); set(14, 0.18, 0.62);
+    set(23, -0.08, 0.5 - kneeBend); set(24, 0.08, 0.5 - kneeBend);
+    set(25, -0.1, 0.27); set(26, 0.1, 0.27);
+    set(27, -0.12, 0.02); set(28, 0.12, 0.02); set(29, -0.12, 0); set(30, 0.12, 0); set(31, -0.1, 0); set(32, 0.1, 0);
+    // wrists: paddle low for "Me", swing burst near own shots
+    let rwx = 0.22, rwy = k === 0 ? 0.40 : 0.62;
+    const mine = shots.find(s => s.slot === k && Math.abs(s.t - t) < 0.25);
+    if (mine) { const ph = (t - mine.t) / 0.25; rwx += 0.35 * Math.cos(ph * Math.PI); rwy += 0.15 * Math.sin(ph * Math.PI); }
+    set(16, rwx, rwy); set(15, -0.2, 0.55);
+    set(19, -0.2, 0.55); set(20, rwx, rwy);
+    return lm;
+  }
+  const samples = [];
+  for (let i = 0; i <= dur * fps; i++) {
+    const t = i / fps;
+    samples.push({ t, p: players.map((_, k) => { const [cx, cy] = pos(k, t); return { lm: landmarks(k, t), cx, cy, conf: 0.9 }; }), b: null });
+  }
+  const match = {
+    id: 'test', name: 'synthetic', createdAt: Date.now(),
+    cfg: { format: 'doubles', skill: '3.5', myTeam: 'A', fps, sensitivity: 3.5 },
+    players, cal, samples, outcomes: {}, video: { name: 'x', size: 1, duration: dur, w: 1920, h: 1080 },
+  };
+
+  const t0 = performance.now();
+  let A = analyze(match);
+  check('analyze runs', true, `${(performance.now() - t0).toFixed(0)} ms for ${samples.length} samples`);
+  const expectedRallies = Math.floor((dur - 18 - 2) / 18) + 1;
+  check('rallies detected', A.rallies.length === expectedRallies, `${A.rallies.length} (expected ${expectedRallies})`);
+  check('shots detected', Math.abs(A.shots.length - shots.length) <= 2, `${A.shots.length} (expected ${shots.length})`);
+  check('first shot is serve', A.shots[0]?.type === 'Serve', A.shots.slice(0, 4).map(s => s.type).join(', '));
+  check('handedness right', A.handed.every(h => h === 'R'), A.handed.join(''));
+  const me = A.metrics[0], p2 = A.metrics[1];
+  check('Me slower to kitchen than partner', median(me.arrivalThird) > median(p2.arrivalThird), `${median(me.arrivalThird).toFixed(2)}s vs ${median(p2.arrivalThird).toFixed(2)}s`);
+  check('Me paddle low', me.paddleLowPct > 0.8, `${(me.paddleLowPct * 100).toFixed(0)}%`);
+  check('Partner paddle up', p2.paddleLowPct < 0.2, `${(p2.paddleLowPct * 100).toFixed(0)}%`);
+
+  // label outcomes: team B wins every other rally via "Me" error
+  A.rallies.forEach((r, i) => { match.outcomes[r.id] = i % 2 ? { winner: 'B', how: 'error', by: 0 } : { winner: 'A', how: 'winner', by: 1 }; });
+  A = analyze(match);
+  const C = coach(match, A);
+  check('outcomes applied', A.team.A.labeled === A.rallies.length, `won ${A.team.A.won} lost ${A.team.A.lost}`);
+  check('findings generated', C.findings.length > 0, C.findings.map(f => `${f.who}: ${f.ruleId}(${f.severity})`).join('; '));
+  check('paddle_low flagged for Me', C.findings.some(f => f.ruleId === 'paddle_low' && f.slot === 0));
+  check('lens split', C.findings.some(f => f.lens === 'fix'), `fix=${C.findings.filter(f => f.lens === 'fix').length} exploit=${C.findings.filter(f => f.lens === 'exploit').length}`);
+  const plan = buildPlan(C, match);
+  check('plan has 7 days', plan.days.length === 7, plan.days[0].items.map(i => i.name).join(', '));
+  const json = matchToJSON(match);
+  const back2 = matchFromJSON(json);
+  check('json round-trip', back2.samples[5].p[0].lm instanceof Float32Array && back2.samples.length === samples.length, `${(json.length / 1e6).toFixed(1)} MB`);
+  log.push('', 'SUMMARY: ' + C.summary.replace(/<[^>]+>/g, ''));
+  // store for the UI smoke test (open index.html#open=selftest)
+  if (location.search.includes('store')) {
+    const { saveMatch } = await import('../js/db.js');
+    match.id = 'selftest'; match.name = 'Synthetic self-test match';
+    await saveMatch(match, { id: 'selftest', name: match.name, createdAt: match.createdAt, duration: A.duration, format: 'doubles', skill: '3.5', rallies: A.rallies.length, shots: A.shots.length, me: 'Me', topFix: [], topExploit: [], key: {} });
+    log.push('STORED selftest match');
+  }
+} catch (e) {
+  log.push('FAIL exception — ' + e.stack);
+}
+function median(a) { const v = a.map(e => e.dt).sort((x, y) => x - y); return v[v.length >> 1]; }
+out.textContent = log.join('\n');
+document.title = log.some(l => l.startsWith('FAIL')) ? 'FAILED' : 'PASSED';
+</script>
+</body></html>
