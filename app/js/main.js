@@ -15,6 +15,8 @@ import { toGrid, fromGrid, isEmpty, poseMasked, maskedAt, drawMask, attachPainte
 import { computeAccuracy, CLASSES, PHASES } from './accuracy.js';
 import { setupTrim } from './trim.js';
 import { buildCallouts, activeCallouts, drawCallouts, headFromPose } from './callouts.js';
+import { stabilizeView } from './camera.js';
+import { finishDetection } from './tracking.js';
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -282,6 +284,7 @@ $('#calConfirm').addEventListener('click', async () => {
   let cal;
   try { cal = makeCalibration(state.calPts); } catch { toast('Those points do not form a court — reset and try again.'); return; }
   state.draft.cal = cal;
+  state.draft.cfg.camera = $('#calCamera').value;
   state.draft.video = { name: state.file.name, size: state.file.size, duration: procVideo.duration, w: procVideo.videoWidth, h: procVideo.videoHeight, sourceUrl: state.sourceUrl || null };
   await calib.startPlayers();
 });
@@ -360,7 +363,33 @@ async function persist() {
   try { await saveMatch(match, summaryOf(match, A, C)); } catch (e) { console.error(e); toast('Could not save to browser storage: ' + e.message); }
 }
 
+/**
+ * Decide the court view per frame (locked to the calibration, or following a moving camera,
+ * smoothed) and re-derive every player's court position from their feet with that view,
+ * so a jittery camera estimate can't make players or the court lines wander.
+ */
+function applyCameraView() {
+  const m = state.match;
+  const mode = m.cfg.camera || 'fixed';
+  state.camView = stabilizeView(m.samples, m.cal.imgPts, mode);
+  const cals = state.camView.corners.map(c => { try { return c ? makeCalibration(c) : null; } catch { return null; } });
+  m.samples.forEach((s, i) => {
+    const cal = cals[i] || m.cal;
+    s.p.forEach(p => {
+      if (!p?.lm) return;
+      const d = finishDetection(p.lm, cal);
+      if (Number.isFinite(d.cx) && Number.isFinite(d.cy)) { p.cx = +d.cx.toFixed(2); p.cy = +d.cy.toFixed(2); }
+    });
+  });
+  const sel = $('#tCourtMode');
+  if (sel) {
+    sel.value = mode;
+    sel.options[0].textContent = `auto (${state.camView.fixed && mode === 'auto' ? 'locked' : mode === 'auto' ? 'following' : '…'})`;
+  }
+}
+
 function recompute() {
+  applyCameraView();
   state.A = analyze(state.match);
   state.R = computeAccuracy(state.match, state.A);
   state.R.perPlayer.forEach((p, k) => { state.A.metrics[k].accuracy = p.accuracy; });
@@ -900,6 +929,13 @@ $$('.speed button').forEach(b => b.addEventListener('click', () => {
 }));
 ['#tBox', '#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
 $('#tCoachWho').addEventListener('change', () => { if (state.lens === 'callouts') renderFindings(); });
+$('#tCourtMode').addEventListener('change', e => {
+  if (!state.match) return;
+  state.match.cfg.camera = e.target.value;
+  recompute(); renderAnalysis(); persist();
+  drawOverlayNow(true);
+  toast(state.camView.fixed ? 'Court locked to your calibration.' : 'Court lines follow the camera (smoothed).');
+});
 
 // seek bar, ±5 s, click the video to play/pause
 const seek = $('#seek');
@@ -936,10 +972,12 @@ document.addEventListener('keydown', e => {
 
 // ---- overlay drawing
 function calibrationAt(t) {
-  const S = state.match.samples, T = state.A.T;
+  const v = state.camView;
+  if (!v || v.fixed) return state.match.cal; // locked: the court never moves
+  const S = state.match.samples, T = state.A.T, base = state.match.cal.imgPts;
   const i = bisect(T, t), a = S[i], b = S[i + 1];
-  if (!a?.c && !b?.c) return state.match.cal;
-  const ca = a?.c || b.c, cb = b?.c || ca;
+  if (!v.corners[i] && !v.corners[i + 1]) return state.match.cal;
+  const ca = v.corners[i] || base, cb = v.corners[i + 1] || ca;
   const f = a && b && b.t > a.t ? clamp((t - a.t) / (b.t - a.t), 0, 1) : 0;
   try { return makeCalibration(ca.map((p, j) => [p[0] + (cb[j][0] - p[0]) * f, p[1] + (cb[j][1] - p[1]) * f])); }
   catch { return state.match.cal; }

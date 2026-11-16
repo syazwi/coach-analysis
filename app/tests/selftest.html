@@ -202,6 +202,40 @@ try {
   check('unlabeled final shot is not called a mistake', neutralR.review[finalJ].score >= 74 && !['mistake', 'blunder'].includes(neutralR.review[finalJ].cls));
   winnerRally.outcome = savedOutcome;
   {
+    // court view: jitter on a fixed camera is locked; a real pan is followed but smoothed
+    const { stabilizeView, cornerShift } = await import('../js/camera.js');
+    const base = [[0.3, 0.3], [0.7, 0.3], [0.9, 0.9], [0.1, 0.9]];
+    const shift = (dx, dy) => base.map(([x, y]) => [x + dx, y + dy]);
+    const jitter = Array.from({ length: 100 }, (_, i) => ({ t: i / 10, c: shift(Math.sin(i * 1.7) * 0.006, Math.cos(i * 2.3) * 0.005) }));
+    const vj = stabilizeView(jitter, base, 'auto');
+    check('jittery fixed camera: court locked', vj.fixed && vj.corners.every(c => c === null), `spread ${(vj.spread * 100).toFixed(1)}%`);
+    check('locked mode ignores camera estimates', stabilizeView(jitter.map((s, i) => ({ ...s, c: shift(i * 0.002, 0) })), base, 'fixed').fixed);
+    const pan = Array.from({ length: 100 }, (_, i) => ({ t: i / 10, c: shift(i * 0.002 + (i === 50 ? 0.08 : 0), 0) }));
+    const vp = stabilizeView(pan, base, 'auto');
+    // the live tracker on rendered frames: a still camera must stay exactly on the calibration
+    const { CameraCalibrationTracker } = await import('../js/camera.js');
+    const { makeCalibration: mkCal } = await import('../js/court.js');
+    const W = 960, H = 540, frame = document.createElement('canvas'); frame.width = W; frame.height = H;
+    const fx = frame.getContext('2d');
+    const paint = (dx, noise) => {
+      fx.fillStyle = '#2f6fb0'; fx.fillRect(0, 0, W, H);
+      let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      for (let k = 0; k < 400; k++) { fx.fillStyle = `hsl(${rnd() * 360},60%,${30 + rnd() * 50}%)`; fx.fillRect(rnd() * W + dx, rnd() * H, 4 + rnd() * 10, 4 + rnd() * 10); }
+      fx.strokeStyle = '#fff'; fx.lineWidth = 3; fx.strokeRect(200 + dx, 120, 560, 380); fx.beginPath(); fx.moveTo(200 + dx, 310); fx.lineTo(760 + dx, 310); fx.stroke();
+      if (noise) { fx.fillStyle = '#f80'; fx.fillRect(300 + noise * 40, 200, 40, 120); } // a "player" moving
+    };
+    const camCal = mkCal([[200 / W, 120 / H], [760 / W, 120 / H], [760 / W, 500 / H], [200 / W, 500 / H]]);
+    const ct = new CameraCalibrationTracker(camCal, W, H);
+    paint(0, 0); ct.update(frame);
+    let still = true;
+    for (let k = 1; k <= 12; k++) { paint(0, k); const st = ct.update(frame); if (st.transform.some((v, j) => Math.abs(v - [1, 0, 0, 0, 1, 0][j]) > 1e-9)) still = false; }
+    check('still camera with a moving player: court stays exactly put', still, ct.transform.map(v => v.toFixed(3)).join(','));
+    for (let k = 1; k <= 10; k++) { paint(k * 6, 0); ct.update(frame); }
+    check('panned camera is followed', Math.abs(ct.transform[2] * W - 60) < 8, `moved ${(ct.transform[2] * W).toFixed(1)} px of 60`);
+    check('panning camera: court follows, one bad frame smoothed out', !vp.fixed && cornerShift(vp.corners[90], shift(0.18, 0)) < 0.004 && cornerShift(vp.corners[50], shift(0.1, 0)) < 0.006,
+      `frame 50 off by ${(cornerShift(vp.corners[50], shift(0.1, 0)) * 100).toFixed(2)}%`);
+  }
+  {
     // unlabeled rallies: winner worked out from serve order / put-away; winners are not "inaccurate"
     const pl = [{ team: 'A' }, { team: 'A' }, { team: 'B' }, { team: 'B' }];
     const ser = pl.map(() => ({ y: [NaN], knee: [150], present: [1], dyR: [0], dyL: [0], visR: [0], visL: [0] }));

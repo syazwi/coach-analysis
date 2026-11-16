@@ -165,6 +165,12 @@
           </div>
         </div>
         <p class="muted" id="calHint">Click in order: <b>1 far-left</b>, <b>2 far-right</b>, <b>3 near-right</b>, <b>4 near-left</b>. For portrait or cropped video, place missing corners in the dark outside-video area where the visible court lines would meet.</p>
+        <p class="muted small"><label>Camera:
+          <select id="calCamera" class="mini-select">
+            <option value="fixed" selected>fixed on a tripod / fence — court never moves</option>
+            <option value="auto">not sure — detect camera movement</option>
+            <option value="moving">moves (pans / zooms) — court follows the camera</option>
+          </select></label></p>
         <div class="cal-wrap"><canvas id="calCanvas"></canvas></div>
         <label class="scrub"><button type="button" class="btn icon" id="calPlay" title="Play / pause">▶</button>
           <select id="calSpeed"><option value="0.5">½×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
@@ -315,6 +321,9 @@
             <label class="toggle"><input type="checkbox" id="tSkel" checked> Skeleton</label>
             <label class="toggle"><input type="checkbox" id="tBall" checked> Ball</label>
             <label class="toggle"><input type="checkbox" id="tCourt" checked> Court</label>
+            <select id="tCourtMode" aria-label="Court lines" class="mini-select" title="Locked: court lines stay where you calibrated them (camera on a tripod or fence). Follow camera: court lines move with a panning or zooming camera. Auto picks one from how much the camera moved.">
+              <option value="auto">auto</option><option value="fixed">🔒 locked</option><option value="moving">follow camera</option>
+            </select>
             <label class="toggle"><input type="checkbox" id="tLabels" checked> Labels</label>
             <label class="toggle" title="Short lines a coach would shout, shown above the player at the moment they apply"><input type="checkbox" id="tCoach" checked> 📣 Coach</label>
             <select id="tCoachWho" aria-label="Coach callouts for" class="mini-select">

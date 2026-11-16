@@ -60,12 +60,12 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
   async function pass(order, dir) {
     if (!order.length) return true;
     const tracker = new Tracker(players, trackOpts);
-    const camera = new CameraCalibrationTracker(cal, vw, vh);
+    const camera = cfg.camera === 'fixed' ? null : new CameraCalibrationTracker(cal, vw, vh); // fixed camera: court never moves
     const tRef = times[order[0]].t;
     let prevSeg = -1;
     // Backward tracking starts from the same calibrated frame as the forward pass,
     // then follows camera motion in reverse toward the beginning.
-    if (dir < 0 && forward.length) {
+    if (dir < 0 && forward.length && camera) {
       await seekVideo(video, times[forward[0]].t);
       camera.update(video);
     }
@@ -78,7 +78,7 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
       prevSeg = seg;
       const vt = dir > 0 ? t : tRef + (tRef - t);
       await seekVideo(video, t);
-      const cameraState = camera.update(video);
+      const cameraState = camera ? camera.update(video) : { cal, transform: null, confidence: 1 };
       detector.setCalibration(cameraState.cal);
       ball?.setCalibration(cameraState.cal);
       tracker.setCameraTransform(cameraState.transform);
@@ -93,7 +93,7 @@ export async function processVideo(match, video, { onStatus, onProgress, onFrame
       const b = ball ? ball.detect(video, t) : null;
       const sample = {
         t: +t.toFixed(3),
-        c: cameraState.cal.imgPts.map(([x, y]) => [+x.toFixed(6), +y.toFixed(6)]),
+        c: camera ? cameraState.cal.imgPts.map(([x, y]) => [+x.toFixed(6), +y.toFixed(6)]) : undefined,
         cm: +cameraState.confidence.toFixed(2),
         p: assigned.map(d => (d ? { lm: d.lm, cx: +d.cx.toFixed(2), cy: +d.cy.toFixed(2), conf: +d.conf.toFixed(2) } : null)),
         b: b ? [+b[0].toFixed(4), +b[1].toFixed(4)] : null,

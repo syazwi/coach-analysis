@@ -20,6 +20,48 @@ export function composeAffine(after, before) {
   ];
 }
 
+/** Largest movement (fraction of frame width) of the given points between two transforms. */
+export function affineShift(a, b, pts) {
+  let m = 0;
+  for (const [x, y] of pts) {
+    const p = applyAffine(a, x, y), q = applyAffine(b, x, y);
+    m = Math.max(m, Math.hypot(p[0] - q[0], p[1] - q[1]));
+  }
+  return m;
+}
+
+/** Largest movement between two sets of 4 court corners (normalized image units). */
+export function cornerShift(a, b) {
+  let m = 0;
+  for (let j = 0; j < 4; j++) m = Math.max(m, Math.hypot(a[j][0] - b[j][0], a[j][1] - b[j][1]));
+  return m;
+}
+
+const med = v => { const s = v.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
+
+/**
+ * Court view used for playback and court positions.
+ *  mode 'fixed'  → always the calibrated court (tripod / fixed camera)
+ *  mode 'moving' → follow the per-frame camera estimate, smoothed (median over ±window s)
+ *  mode 'auto'   → 'fixed' when the estimate barely moves over the match, else 'moving'
+ * Returns { fixed, corners: per-sample [[x,y]×4] or null (= calibrated court), spread }.
+ */
+export function stabilizeView(samples, baseCorners, mode = 'auto', { window = 0.75, snap = 0.006, fixedSpread = 0.02 } = {}) {
+  const n = samples.length, none = () => new Array(n).fill(null);
+  const shifts = samples.filter(s => s.c).map(s => cornerShift(s.c, baseCorners)).sort((a, b) => a - b);
+  const spread = shifts.length ? shifts[Math.floor(shifts.length * 0.9)] : 0;
+  if (mode === 'fixed' || !shifts.length || (mode !== 'moving' && spread < fixedSpread)) return { fixed: true, corners: none(), spread };
+  const corners = samples.map((s, i) => {
+    const near = [];
+    for (let k = i; k >= 0 && s.t - samples[k].t <= window; k--) if (samples[k].c) near.push(samples[k].c);
+    for (let k = i + 1; k < n && samples[k].t - s.t <= window; k++) if (samples[k].c) near.push(samples[k].c);
+    if (!near.length) return null;
+    const c = [0, 1, 2, 3].map(j => [med(near.map(v => v[j][0])), med(near.map(v => v[j][1]))]);
+    return cornerShift(c, baseCorners) < snap ? null : c;
+  });
+  return { fixed: false, corners, spread };
+}
+
 export function calibrationFromTransform(base, transform) {
   return makeCalibration(base.imgPts.map(([x, y]) => applyAffine(transform, x, y)));
 }
@@ -169,33 +211,58 @@ export class CameraCalibrationTracker {
 
   resetFrameReference() { this.prev = null; this.points = []; this.lastDelta = IDENTITY_AFFINE.slice(); }
 
+  /** How far (analysis-frame px) the court corners move between two transforms. */
+  shiftPx(a, b) {
+    return affineShift(a, b, this.base.imgPts) * this.w;
+  }
+
   update(video) {
     const curr = this.capture(video);
     if (!this.prev) {
       this.prev = curr;
-      this.points = selectFeatures(curr, this.w, this.h, this.cal);
-      return { cal: this.cal, transform: this.transform, moved: false, confidence: 0 };
+      this.ref = curr; // the calibration frame: every later frame is measured against it (no drift)
+      this.refPoints = selectFeatures(curr, this.w, this.h, this.base, 32);
+      this.points = this.refPoints.slice();
+      return { cal: this.cal, transform: this.transform, moved: false, confidence: 1 };
     }
-    const pairs = trackFeatures(this.prev, curr, this.points, this.w, this.h, this.lastDelta);
-    const fit = robustSimilarity(pairs, this.w, this.h);
-    const diag = Math.hypot(this.w, this.h);
-    const accepted = fit && fit.inliers.length >= 4 && fit.inliers.length >= pairs.length * 0.4 && fit.rmse <= 2.2
-      && fit.scale >= 0.94 && fit.scale <= 1.06 && Math.abs(fit.angle) <= 0.08 && Math.hypot(fit.tx, fit.ty) <= diag * 0.08;
-    if (accepted) {
-      this.lastDelta = fit.affine;
-      this.transform = composeAffine(fit.affine, this.transform);
-      try { this.cal = calibrationFromTransform(this.base, this.transform); } catch { /* keep last valid calibration */ }
-      this.points = fit.inliers.map(p => p.to);
-    } else {
-      this.lastDelta = IDENTITY_AFFINE.slice();
-      this.points = [];
+    let next = null, confidence = 0;
+    // 1) Anchored: find the calibration frame's court features in this frame directly.
+    //    Errors do not add up over time, so a fixed camera stays put.
+    if (this.refPoints.length >= 6) {
+      const pairs = trackFeatures(this.ref, curr, this.refPoints, this.w, this.h, this.transform);
+      const fit = robustSimilarity(pairs, this.w, this.h, 2);
+      if (fit && fit.inliers.length >= 6 && fit.inliers.length >= pairs.length * 0.5 && fit.rmse <= 1.8
+        && fit.scale >= 0.6 && fit.scale <= 1.6 && Math.abs(fit.angle) <= 0.2) {
+        next = fit.affine; confidence = fit.inliers.length / Math.max(1, pairs.length);
+      }
     }
+    // 2) Camera has moved too far from the calibration view: chain frame to frame.
+    if (!next) {
+      const pairs = trackFeatures(this.prev, curr, this.points, this.w, this.h, this.lastDelta);
+      const fit = robustSimilarity(pairs, this.w, this.h);
+      const diag = Math.hypot(this.w, this.h);
+      const accepted = fit && fit.inliers.length >= 4 && fit.inliers.length >= pairs.length * 0.4 && fit.rmse <= 2.2
+        && fit.scale >= 0.94 && fit.scale <= 1.06 && Math.abs(fit.angle) <= 0.08 && Math.hypot(fit.tx, fit.ty) <= diag * 0.08;
+      this.lastDelta = accepted ? fit.affine : IDENTITY_AFFINE.slice();
+      if (accepted && this.shiftPx(fit.affine, IDENTITY_AFFINE) >= 0.6) { // sub-pixel steps are noise, not motion
+        next = composeAffine(fit.affine, this.transform);
+        confidence = fit.inliers.length / Math.max(1, pairs.length) * 0.8;
+      }
+    }
+    const before = this.transform;
+    if (next) {
+      // 3) Dead zone: tiny differences from the calibration view are noise → exactly the calibration;
+      //    tiny frame-to-frame changes are jitter → hold the current view.
+      if (this.shiftPx(next, IDENTITY_AFFINE) < 1.5) next = IDENTITY_AFFINE.slice();
+      else if (this.shiftPx(next, this.transform) < 0.5) next = this.transform;
+      if (next !== this.transform) {
+        try { this.cal = calibrationFromTransform(this.base, next); this.transform = next; } catch { /* keep last valid calibration */ }
+      }
+    }
+    const moved = before !== this.transform;
     this.frame++;
-    if (this.points.length < 8 || this.frame % 8 === 0) this.points = selectFeatures(curr, this.w, this.h, this.cal);
+    this.points = selectFeatures(curr, this.w, this.h, this.cal); // fresh features in this frame for the next step
     this.prev = curr;
-    return {
-      cal: this.cal, transform: this.transform, moved: !!accepted,
-      confidence: accepted ? fit.inliers.length / Math.max(1, pairs.length) : 0,
-    };
+    return { cal: this.cal, transform: this.transform, moved, confidence };
   }
 }
