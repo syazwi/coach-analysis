@@ -547,7 +547,7 @@ function renderReview() {
   const P = match.players;
   $('#reviewNote').textContent = R.labeledCount === R.totalRallies
     ? 'Scores use rally outcomes, what the opponent did with each shot, tactical fit and body mechanics.'
-    : `${R.labeledCount || 0}/${R.totalRallies || 0} rally outcomes labeled. Unlabeled final shots stay neutral; label the outcome to score winners and errors.`;
+    : `${R.labeledCount || 0}/${R.totalRallies || 0} rally outcomes labeled${R.autoCount ? `, ${R.autoCount} worked out automatically from serve order or put-aways` : ''}. Shots by the team that won a rally are penalised less. Label rallies in “Rallies & outcomes” to confirm winners and errors.`;
   $('#accTiles').innerHTML = P.map((p, k) => {
     const pp = R.perPlayer[k];
     return `<div class="acc-tile" style="border-top-color:${playerColor(P, k)}">

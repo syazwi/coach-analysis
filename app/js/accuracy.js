@@ -51,6 +51,29 @@ export function decisiveOutcome(rally, outcome, shots, players) {
   return { j, slot: shots[j].slot, how: outcome.how, inferred: by < 0 || shots[j].slot !== by };
 }
 
+// Rallies nobody labeled: work out who won from what happened next.
+//  - serve order (side-out scoring): the same player serving the next rally
+//    means the serving team won; anyone else serving means the serving team lost.
+//  - otherwise, a rally that ends on a put-away (overhead / speed-up / very
+//    hard ball) goes to the team that hit it.
+// The last shot of the winning team becomes the winner; the last shot of the
+// losing team (if it was the final contact) the error. Marked `auto`.
+export function inferOutcome(rallies, i, shots) {
+  const r = rallies[i];
+  if (!r || r.outcome?.winner || !r.shots.length) return null;
+  const last = shots[r.shots.at(-1)];
+  if (!last) return null;
+  let winner = null, source = null;
+  const nx = rallies[i + 1];
+  if (nx && r.serverTeam && nx.serverTeam && nx.start - r.end < 45) {
+    winner = nx.serverSlot === r.serverSlot ? r.serverTeam : (r.serverTeam === 'A' ? 'B' : 'A');
+    source = 'serve order';
+  }
+  if (!winner && (ATTACK_TYPES.has(last.type) || last.rel > 1.4)) { winner = last.team; source = 'put-away'; }
+  if (!winner) return null;
+  return { winner, how: last.team === winner ? 'winner' : 'error', by: last.slot, auto: true, source };
+}
+
 export function computeAccuracy(match, A) {
   const { shots, rallies, series, handed, T } = A;
   const players = match.players;
@@ -65,7 +88,14 @@ export function computeAccuracy(match, A) {
     for (let i = bisect(T, t); i < T.length && T[i] <= t + 8; i++) if (Number.isFinite(s.y[i]) && distToNet(s.y[i]) <= 10) return T[i] - t;
     return Infinity;
   };
-  const decisive = rallies.map(r => decisiveOutcome(r, r.outcome, shots, players));
+  const autoOutcome = rallies.map((r, i) => inferOutcome(rallies, i, shots));
+  const decisive = rallies.map((r, i) => {
+    const d = decisiveOutcome(r, r.outcome, shots, players);
+    if (d || !autoOutcome[i]) return d;
+    const a = decisiveOutcome(r, autoOutcome[i], shots, players);
+    return a ? { ...a, auto: true, winner: autoOutcome[i].winner, source: autoOutcome[i].source } : null;
+  });
+  const winnerOf = ri => rallies[ri]?.outcome?.winner || autoOutcome[ri]?.winner || null;
 
   const review = shots.map((sh, j) => {
     const r = rallies[sh.rally];
@@ -77,13 +107,18 @@ export function computeAccuracy(match, A) {
     const why = [];
     const add = (d, text) => { score += d; why.push({ d, text }); };
 
-    // --- outcome (needs labels)
-    if (result?.j === j && result.how === 'error') { score = 8; why.push({ d: -74, text: 'Unforced error — ended the rally' }); }
+    // --- outcome (labeled, or auto-detected when unlabeled)
+    const won = winnerOf(sh.rally);
+    const teamWon = won === sh.team, teamLost = !!won && won !== sh.team;
+    const src = result?.source || 'play';
+    if (result?.j === j && result.how === 'error' && result.auto) { score = 60; why.push({ d: -22, text: `Last shot of a lost point (auto-detected from ${src} — label the rally to confirm)` }); }
+    else if (result?.j === j && result.how === 'error') { score = 8; why.push({ d: -74, text: 'Unforced error — ended the rally' }); }
+    else if (result?.j === j && result.how === 'winner' && result.auto) { score = 95; why.push({ d: 13, text: `Point-winning shot (auto-detected from ${src})` }); }
     else if (result?.j === j && result.how === 'winner') { score = 100; why.push({ d: 18, text: result.inferred ? 'Point-winning shot' : 'Winner' }); }
     else {
       if (next && result?.j === j + 1) {
-        if (result.how === 'error') add(10, 'Forced the opponent into an error');
-        if (result.how === 'winner') add(-35, 'Set up the opponent’s winner');
+        if (result.how === 'error') add(result.auto ? 8 : 10, 'Forced the opponent into an error');
+        if (result.how === 'winner') add(result.auto ? -20 : -35, 'Set up the opponent’s winner');
       }
       // --- what the opponent did with it
       if (next && sh.type !== 'Serve') {
@@ -111,7 +146,9 @@ export function computeAccuracy(match, A) {
         }
         case 'Reset (transition)':
           if (sh.rel < 0.9) add(6, 'Soft reset from the transition zone');
-          else add(-12, 'Hard shot from the transition zone');
+          else if (next && ATTACK_TYPES.has(next.type)) { if (sh.rel >= 1.15) add(-8, 'Hard shot from the transition zone was attacked'); }
+          else if (teamWon) add(4, 'Aggressive shot from the transition zone paid off');
+          else if (teamLost) add(-8, 'Hard shot from the transition zone — a reset is safer');
           break;
         case 'Dink':
           add(3, 'Patient dink');
@@ -120,7 +157,7 @@ export function computeAccuracy(match, A) {
           const target = next ? next.slot : opps[0];
           if (target !== undefined && paddleLow(target, sh.t)) add(12, 'Attacked a low paddle');
           else if (target !== undefined && !atKitchen(target, sh.t)) add(8, 'Attacked a player out of position');
-          if (next && ATTACK_TYPES.has(next.type) && o?.winner && o.winner !== sh.team) add(-12, 'Speed-up was countered and the point lost');
+          if (next && ATTACK_TYPES.has(next.type) && teamLost) add(-12, 'Speed-up was countered and the point lost');
           break;
         }
         case 'Overhead':
@@ -132,9 +169,15 @@ export function computeAccuracy(match, A) {
         default:
       }
       // --- mechanics at contact
-      if (sh.reach > 2.2) add(-6, 'Reached instead of moving the feet');
+      if (sh.reach > 2.2) add(-4, 'Reached instead of moving the feet');
       const knee = series[sh.slot].knee[sh.i];
-      if (sh.zone === 'kitchen' && knee > 168) add(-4, 'Upright at contact');
+      if (sh.zone === 'kitchen' && knee > 168) add(-3, 'Upright at contact');
+      // Winning the point outweighs small process faults: give half the penalty back.
+      if (teamWon) {
+        const lost = why.filter(w => w.d < 0).reduce((a, w) => a + w.d, 0);
+        if (lost < 0) { score -= lost / 2; why.push({ d: -lost / 2, text: 'Half the penalty back — your team won the rally' }); }
+        add(4, 'Your team won the rally');
+      }
     }
     // The final contact can be either a winner or an error. Without a resolved
     // outcome, do not call it a mistake from motion alone.
@@ -142,6 +185,8 @@ export function computeAccuracy(match, A) {
       why.push({ d: 82 - score, text: 'Rally result unlabeled — final shot kept neutral' });
       score = 82;
     }
+    // Brilliant needs a confirmed (labeled) result; auto-detected rallies top out at Great.
+    if (result?.auto && score > 96) score = 96;
     score = Math.max(0, Math.min(100, Math.round(score)));
     return { j, slot: sh.slot, t: sh.t, score, cls: classOf(score).id, why };
   });
@@ -156,6 +201,7 @@ export function computeAccuracy(match, A) {
   });
   const team = {};
   for (const tm of ['A', 'B']) team[tm] = mean(review.filter(x => players[x.slot].team === tm).map(x => x.score));
-  const labeledCount = decisive.filter(Boolean).length;
-  return { review, perPlayer, team, labeled: labeledCount > 0, labeledCount, totalRallies: rallies.length };
+  const labeledCount = decisive.filter(d => d && !d.auto).length;
+  const autoCount = decisive.filter(d => d?.auto).length;
+  return { review, perPlayer, team, labeled: labeledCount > 0, labeledCount, autoCount, totalRallies: rallies.length };
 }

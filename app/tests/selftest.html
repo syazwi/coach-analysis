@@ -201,6 +201,26 @@ try {
   const finalJ = winnerRally.shots.at(-1);
   check('unlabeled final shot is not called a mistake', neutralR.review[finalJ].score >= 74 && !['mistake', 'blunder'].includes(neutralR.review[finalJ].cls));
   winnerRally.outcome = savedOutcome;
+  {
+    // unlabeled rallies: winner worked out from serve order / put-away; winners are not "inaccurate"
+    const pl = [{ team: 'A' }, { team: 'A' }, { team: 'B' }, { team: 'B' }];
+    const ser = pl.map(() => ({ y: [NaN], knee: [150], present: [1], dyR: [0], dyL: [0], visR: [0], visL: [0] }));
+    const mk = (slot, t, type, rel, zone, rally, idx) => ({ slot, team: pl[slot].team, t, i: 0, type, rel, reach: 0, zone, rally, idx });
+    const sh = [
+      mk(0, 1, 'Serve', 1, 'baseline', 0, 0), mk(2, 2, 'Return', 1, 'baseline', 0, 1), mk(0, 3, '3rd-shot drop', 0.8, 'baseline', 0, 2),
+      mk(1, 4, 'Reset (transition)', 1.3, 'transition', 0, 3), mk(3, 5, 'Dink', 0.8, 'kitchen', 0, 4),
+      mk(0, 20, 'Serve', 1, 'baseline', 1, 0), mk(2, 21, 'Return', 1, 'baseline', 1, 1), mk(0, 22, 'Overhead', 1.5, 'transition', 1, 2),
+    ];
+    const ral = [
+      { index: 0, shots: [0, 1, 2, 3, 4], start: 0, end: 6.5, serverSlot: 0, serverTeam: 'A', outcome: null },
+      { index: 1, shots: [5, 6, 7], start: 19, end: 23.5, serverSlot: 0, serverTeam: 'A', outcome: null },
+    ];
+    const Ra = computeAccuracy({ players: pl }, { shots: sh, rallies: ral, series: ser, handed: pl.map(() => 'R'), T: Float64Array.from([0]) });
+    check('unlabeled rally winner inferred from serve order', Ra.autoCount === 2 && Ra.review[4].cls === 'inaccuracy' && Ra.review[4].score === 60, `auto ${Ra.autoCount}; loser last shot ${Ra.review[4].score} ${Ra.review[4].cls}`);
+    check('hard transition shot by the winning team is not an inaccuracy', Ra.review[3].score >= 74, `${Ra.review[3].score} ${Ra.review[3].cls}`);
+    check('auto-detected put-away rated great', Ra.review[7].cls === 'great', `${Ra.review[7].score} ${Ra.review[7].cls}`);
+    check('winning team shots all at least good', [0, 2, 3, 5, 7].every(j => Ra.review[j].score >= 74), [0, 2, 3, 5, 7].map(j => Ra.review[j].score).join(' / '));
+  }
 
   // ---- player calibration: partners in different shirts cross paths; identities must survive
   const { Tracker } = await import('../js/tracking.js');
