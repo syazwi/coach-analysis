@@ -100,6 +100,9 @@
               <label>Skill level
                 <select name="skill"><option>3.0</option><option selected>3.5</option><option>4.0</option><option>4.5</option></select>
               </label>
+              <label>Scoring
+                <select name="scoring"><option value="classic">Classic (side-out) to 11</option><option value="rally">Rally scoring to 15</option></select>
+              </label>
             </div>
             <label>Your team is on the
               <select name="myTeam"><option value="A">near side (closest to camera)</option><option value="B">far side</option></select>
@@ -325,6 +328,7 @@
               <option value="auto">auto</option><option value="fixed">🔒 locked</option><option value="moving">follow camera</option>
             </select>
             <label class="toggle"><input type="checkbox" id="tLabels" checked> Labels</label>
+            <label class="toggle" title="Scoreboard (classic to 11 or rally to 15 — change in Players & settings)"><input type="checkbox" id="tScore" checked> Score</label>
             <label class="toggle" title="Short lines a coach would shout, shown above the player at the moment they apply"><input type="checkbox" id="tCoach" checked> 📣 Coach</label>
             <select id="tCoachWho" aria-label="Coach callouts for" class="mini-select">
               <option value="all">everyone</option><option value="mine">my team</option><option value="opp">opponents</option>
@@ -482,7 +486,8 @@
       <label class="check"><input type="checkbox" name="minimap" checked> Mini court map</label>
       <label class="check"><input type="checkbox" name="hud" checked> Rally & shot info</label>
       <label class="check"><input type="checkbox" name="notes" checked> Coach notes (findings)</label>
-      <label class="check"><input type="checkbox" name="coach" checked> 📣 Coach callouts (what to do, as it happens)</label>
+      <label class="check"><input type="checkbox" name="coach" checked> 📣 Coach callouts (what to do, as it happens, and OUT calls)</label>
+      <label class="check"><input type="checkbox" name="score" checked> Scoreboard</label>
     </fieldset>
     <p class="muted small" id="exEstimate"></p>
     <div id="exProgressWrap" hidden>

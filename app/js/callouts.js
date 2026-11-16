@@ -15,6 +15,7 @@ export const CALLOUT_KINDS = {
   fix: { color: '#c98500', icon: '📣' },
   exploit: { color: '#199e70', icon: '🎯' },
   good: { color: '#3987e5', icon: '👍' },
+  call: { color: '#e34948', icon: '✋' },   // line calls and score calls
 };
 
 /**
@@ -129,13 +130,27 @@ export function buildCallouts(match, A) {
       if (sh.reach > 1.9 && n >= 3) add(k, sh.t + 0.25, 'Move your feet — don’t reach!', 'fix', 1, 1.5);
     });
 
-    // --- end of the point (only when the rally outcome was labeled)
-    const win = r.outcome?.winner;
+    // --- server calls the score before serving
+    const sc = A.score?.rallies?.[r.index];
+    if (sc && rs[0]) add(rs[0].slot, rs[0].t - 1.4, `“${sc.call}”${sc.before.game > 1 && sc.before.A + sc.before.B === 0 ? ` — game ${sc.before.game}` : ''}`, 'call', 1, 1.2);
+
+    // --- line call: the ball landed out after the last shot. The player nearest the bounce shouts it.
+    const lc = A.lineCalls?.[r.index];
+    if (lc?.out) {
+      const callers = opps(lc.hitter).map(j => ({ j, p: at(j, lc.t) })).filter(e => e.p)
+        .sort((a, b) => Math.hypot(a.p.x - lc.cx, a.p.y - lc.cy) - Math.hypot(b.p.x - lc.cx, b.p.y - lc.cy));
+      const caller = callers[0]?.j ?? opps(lc.hitter)[0];
+      if (caller !== undefined) add(caller, lc.t, `OUT! — ${lc.how}`, 'call', 6, 1.8);
+      add(lc.hitter, lc.t + 0.1, lc.how === 'wide' ? 'Wide — aim inside the sideline.' : 'Long — more arc, less pace.', 'fix', 5, 1.8);
+    }
+
+    // --- end of the point (labeled, or the ball was called out)
+    const win = r.outcome?.winner || (lc?.out ? (players[lc.hitter].team === 'A' ? 'B' : 'A') : null);
     if (win) {
       const tEnd = rs[rs.length - 1].t + 0.6;
       players.forEach((p, k) => {
         if (p.team === win) add(k, tEnd, 'Great point!', 'good', 4, 1.6);
-        else add(k, tEnd, r.outcome.how === 'error' && r.outcome.by === k ? 'Shake it off — reset, next point.' : 'Next one — stay patient.', 'fix', 4, 1.6);
+        else add(k, tEnd, r.outcome?.how === 'error' && r.outcome.by === k ? 'Shake it off — reset, next point.' : 'Next one — stay patient.', 'fix', 4, 1.6);
       });
     }
   }

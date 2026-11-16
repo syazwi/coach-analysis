@@ -7,6 +7,7 @@
 // Accuracy % = average shot score per player.
 import { bisect, mean } from './util.js';
 import { distToNet } from './court.js';
+import { SCORING, scoringOf, winnerFromServe, otherTeam } from './scoring.js';
 
 export const CLASSES = [
   { id: 'brilliant', name: 'Brilliant', sym: '!!', min: 98, color: '#1baf7a' },
@@ -52,22 +53,23 @@ export function decisiveOutcome(rally, outcome, shots, players) {
 }
 
 // Rallies nobody labeled: work out who won from what happened next.
-//  - serve order (side-out scoring): the same player serving the next rally
-//    means the serving team won; anyone else serving means the serving team lost.
+//  - serve order: classic scoring — the same player serving the next rally means the
+//    serving team won, anyone else means they lost; rally scoring — the winner serves next.
+//  - the ball landed out after the last shot: the hitter's team lost.
 //  - otherwise, a rally that ends on a put-away (overhead / speed-up / very
 //    hard ball) goes to the team that hit it.
 // The last shot of the winning team becomes the winner; the last shot of the
 // losing team (if it was the final contact) the error. Marked `auto`.
-export function inferOutcome(rallies, i, shots) {
+export function inferOutcome(rallies, i, shots, { scoring = SCORING.classic, lineCalls = null } = {}) {
   const r = rallies[i];
   if (!r || r.outcome?.winner || !r.shots.length) return null;
   const last = shots[r.shots.at(-1)];
   if (!last) return null;
-  let winner = null, source = null;
-  const nx = rallies[i + 1];
-  if (nx && r.serverTeam && nx.serverTeam && nx.start - r.end < 45) {
-    winner = nx.serverSlot === r.serverSlot ? r.serverTeam : (r.serverTeam === 'A' ? 'B' : 'A');
-    source = 'serve order';
+  let winner = winnerFromServe(r, rallies[i + 1], scoring), source = winner ? 'serve order' : null;
+  const call = lineCalls?.[i];
+  if (call?.out) {
+    const w = otherTeam(call.team);
+    if (!winner) { winner = w; source = 'ball out'; } else if (winner === w) source = 'ball out';
   }
   if (!winner && (ATTACK_TYPES.has(last.type) || last.rel > 1.4)) { winner = last.team; source = 'put-away'; }
   if (!winner) return null;
@@ -88,7 +90,8 @@ export function computeAccuracy(match, A) {
     for (let i = bisect(T, t); i < T.length && T[i] <= t + 8; i++) if (Number.isFinite(s.y[i]) && distToNet(s.y[i]) <= 10) return T[i] - t;
     return Infinity;
   };
-  const autoOutcome = rallies.map((r, i) => inferOutcome(rallies, i, shots));
+  const inferOpts = { scoring: scoringOf(match.cfg), lineCalls: A.lineCalls || null };
+  const autoOutcome = rallies.map((r, i) => inferOutcome(rallies, i, shots, inferOpts));
   const decisive = rallies.map((r, i) => {
     const d = decisiveOutcome(r, r.outcome, shots, players);
     if (d || !autoOutcome[i]) return d;
@@ -203,5 +206,8 @@ export function computeAccuracy(match, A) {
   for (const tm of ['A', 'B']) team[tm] = mean(review.filter(x => players[x.slot].team === tm).map(x => x.score));
   const labeledCount = decisive.filter(d => d && !d.auto).length;
   const autoCount = decisive.filter(d => d?.auto).length;
-  return { review, perPlayer, team, labeled: labeledCount > 0, labeledCount, autoCount, totalRallies: rallies.length };
+  // winner of every rally as best we know it (labeled first, then auto-detected) for the scoreboard
+  const winners = rallies.map((r, i) => r.outcome?.winner || autoOutcome[i]?.winner || null);
+  const autoSources = autoOutcome.map(a => a?.source || null);
+  return { review, perPlayer, team, labeled: labeledCount > 0, labeledCount, autoCount, totalRallies: rallies.length, winners, autoSources };
 }

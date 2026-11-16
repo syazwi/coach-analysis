@@ -257,6 +257,7 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 .callout-item { display: grid; grid-template-columns: 44px 8px auto 1fr; gap: 8px; align-items: center; text-align: left; background: var(--surface-2); border: 1px solid var(--border); border-left: 3px solid #c98500; border-radius: 6px; padding: 6px 8px; color: var(--text-secondary); font: inherit; font-size: 13px; cursor: pointer; }
 .callout-item.k-exploit { border-left-color: #199e70; }
 .callout-item.k-good { border-left-color: #3987e5; }
+.callout-item.k-call { border-left-color: #e34948; }
 .callout-item i { width: 8px; height: 8px; border-radius: 50%; }
 .callout-item b { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
 .callout-item:hover, .callout-item.now { background: var(--border); color: var(--text-primary); }

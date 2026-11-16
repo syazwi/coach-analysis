@@ -236,6 +236,56 @@ try {
       `frame 50 off by ${(cornerShift(vp.corners[50], shift(0.1, 0)) * 100).toFixed(2)}%`);
   }
   {
+    // scoring: classic side-out to 11 / rally scoring to 15
+    const { computeScore, SCORING, winnerFromServe } = await import('../js/scoring.js');
+    const mkR = (i, slot, team) => ({ index: i, serverSlot: slot, serverTeam: team, start: i * 20, end: i * 20 + 10 });
+    const rs = [mkR(0, 0, 'A'), mkR(1, 0, 'A'), mkR(2, 0, 'A'), mkR(3, 2, 'B'), mkR(4, 3, 'B')];
+    const Sc = computeScore(rs, ['A', 'A', 'B', 'A', 'B'], SCORING.classic, true);
+    check('classic doubles: score calls, first-server exception, second server', Sc.rallies.map(x => x.call).join(' ') === '0-0-2 1-0-2 2-0-2 0-2-1 0-2-2' && Sc.rallies[4].after.A === 2 && Sc.rallies[4].after.B === 1,
+      Sc.rallies.map(x => x.call).join(' '));
+    const Sr = computeScore(rs.slice(0, 3), ['A', 'B', 'B'], SCORING.rally, true);
+    check('rally scoring: every rally scores, winner serves', Sr.rallies.map(x => x.call).join(' ') === '0-0 1-0 1-1' && Sr.rallies[2].after.B === 2 && Sr.rallies[2].after.serving === 'B', Sr.rallies.map(x => x.call).join(' '));
+    const eleven = Array.from({ length: 12 }, (_, i) => mkR(i, 0, 'A'));
+    const Sg = computeScore(eleven, eleven.map(() => 'A'), SCORING.classic, true);
+    check('game ends at 11 (win by 2) and the next starts at 0-0', Sg.rallies[10].gameOver === 'A' && Sg.rallies[11].before.A === 0 && Sg.rallies[11].before.game === 2 && Sg.games.A === 1);
+    const S15 = computeScore(eleven.concat(eleven.map((r, i) => ({ ...r, index: 12 + i }))).slice(0, 16), Array(16).fill('A'), SCORING.rally, true);
+    check('rally scoring game ends at 15', S15.rallies[14].gameOver === 'A' && !S15.rallies[10].gameOver);
+    check('rally scoring: next server is the winner', winnerFromServe(mkR(0, 0, 'A'), mkR(1, 3, 'B'), SCORING.rally) === 'B' && winnerFromServe(mkR(0, 0, 'A'), mkR(1, 1, 'A'), SCORING.classic) === 'B');
+
+    // line calls: ball bounces after the last shot
+    const { findBounces, lineCalls } = await import('../js/linecalls.js');
+    const { makeCalibration: mkCal2 } = await import('../js/court.js');
+    const lcCal = mkCal2([[0.2, 0.2], [0.8, 0.2], [0.8, 0.9], [0.2, 0.9]]);
+    const flight = landY => { // ball hit from the near side, lands on the far half at court y = landY
+      const yb = 0.2 + 0.7 * landY / 44, ys = [yb + 0.06, yb + 0.04, yb + 0.02, yb, yb - 0.08, yb - 0.16];
+      return Array.from({ length: 21 }, (_, k) => { const t = +(k / 10).toFixed(1); const n = Math.round((t - 1.1) * 10); return { t, p: [], b: n >= 0 && n < 6 ? [0.5, ys[n]] : null }; });
+    };
+    const lcShots = [{ slot: 1, team: 'B', t: 0.5, cy: 5 }, { slot: 0, team: 'A', t: 1.0, cy: 40 }];
+    const lcRallies = [{ index: 0, shots: [0, 1], end: 2.5 }];
+    const lcPlayers = [{ team: 'A' }, { team: 'B' }];
+    const outSamples = flight(-3), inSamples = flight(10);
+    const callOut = lineCalls(lcRallies, lcShots, lcPlayers, findBounces(outSamples, () => lcCal))[0];
+    const callIn = lineCalls(lcRallies, lcShots, lcPlayers, findBounces(inSamples, () => lcCal))[0];
+    check('ball landing past the baseline is called OUT long', callOut?.out && callOut.how === 'long' && Math.abs(callOut.cy + 3) < 0.5, callOut ? `${callOut.how} at y=${callOut.cy.toFixed(1)} ft` : 'no bounce');
+    check('ball landing in the court is in', callIn && !callIn.out, callIn ? `y=${callIn.cy.toFixed(1)} ft` : 'no bounce');
+
+    // the OUT call is shouted, and it decides an unlabeled rally
+    const { buildCallouts: bc } = await import('../js/callouts.js');
+    const r0 = A.rallies.find(r => !r.outcome) || A.rallies[0];
+    const lastSh = A.shots[r0.shots.at(-1)];
+    A.lineCalls = A.rallies.map(() => null);
+    A.lineCalls[r0.index] = { rally: r0.index, out: true, how: 'long', hitter: lastSh.slot, team: lastSh.team, t: lastSh.t + 0.5, cx: 10, cy: -3, x: 0.5, y: 0.1 };
+    const outCo = bc(match, A).find(c => c.text.startsWith('OUT!'));
+    check('coach shouts OUT! when the ball lands out', outCo && players[outCo.slot].team !== lastSh.team && Math.abs(outCo.t0 - (lastSh.t + 0.5)) < 1e-6, outCo ? `${players[outCo.slot].label}: ${outCo.text}` : 'none');
+    const saved0 = r0.outcome; r0.outcome = null;
+    const nxSaved = A.rallies[r0.index + 1]; if (nxSaved) A.rallies[r0.index + 1] = { ...nxSaved, serverTeam: null };
+    const Rout = computeAccuracy(match, A);
+    check('out ball gives the rally to the other team', Rout.winners[r0.index] && Rout.winners[r0.index] !== lastSh.team && Rout.autoSources[r0.index] === 'ball out', `${Rout.winners[r0.index]} (${Rout.autoSources[r0.index]})`);
+    if (nxSaved) A.rallies[r0.index + 1] = nxSaved;
+    r0.outcome = saved0;
+    delete A.lineCalls;
+  }
+  {
     // unlabeled rallies: winner worked out from serve order / put-away; winners are not "inaccurate"
     const pl = [{ team: 'A' }, { team: 'A' }, { team: 'B' }, { team: 'B' }];
     const ser = pl.map(() => ({ y: [NaN], knee: [150], present: [1], dyR: [0], dyL: [0], visR: [0], visL: [0] }));

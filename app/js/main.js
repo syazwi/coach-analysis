@@ -16,6 +16,8 @@ import { computeAccuracy, CLASSES, PHASES } from './accuracy.js';
 import { setupTrim } from './trim.js';
 import { buildCallouts, activeCallouts, drawCallouts, headFromPose } from './callouts.js';
 import { stabilizeView } from './camera.js';
+import { findBounces, lineCalls, drawOutMarker } from './linecalls.js';
+import { SCORING, scoringOf, computeScore, scoreAt, drawScoreboard } from './scoring.js';
 import { finishDetection } from './tracking.js';
 
 // ------------------------------------------------------------------ state
@@ -177,6 +179,7 @@ $('#toCalibrate').addEventListener('click', async () => {
       format, skill: fd.get('skill'), myTeam,
       fps: +fd.get('fps'), model: fd.get('model'),
       crops: fd.get('crops') === 'on', ball: fd.get('ball') === 'on', keepVideo: fd.get('keepVideo') === 'on',
+      scoring: fd.get('scoring') || 'classic',
       segments: trim.getSegments(),
       playArea: UNLIMITED, // players are followed wherever they move
       sensitivity: 3.5,
@@ -372,7 +375,7 @@ function applyCameraView() {
   const m = state.match;
   const mode = m.cfg.camera || 'fixed';
   state.camView = stabilizeView(m.samples, m.cal.imgPts, mode);
-  const cals = state.camView.corners.map(c => { try { return c ? makeCalibration(c) : null; } catch { return null; } });
+  const cals = state.camCals = state.camView.corners.map(c => { try { return c ? makeCalibration(c) : null; } catch { return null; } });
   m.samples.forEach((s, i) => {
     const cal = cals[i] || m.cal;
     s.p.forEach(p => {
@@ -390,12 +393,24 @@ function applyCameraView() {
 
 function recompute() {
   applyCameraView();
-  state.A = analyze(state.match);
-  state.R = computeAccuracy(state.match, state.A);
+  const m = state.match;
+  state.A = analyze(m);
+  // line calls: where the ball bounced after each rally's last shot (OUT long / wide)
+  state.A.bounces = findBounces(m.samples, i => state.camCals?.[i] || m.cal);
+  state.A.lineCalls = lineCalls(state.A.rallies, state.A.shots, m.players, state.A.bounces);
+  state.R = computeAccuracy(m, state.A);
   state.R.perPlayer.forEach((p, k) => { state.A.metrics[k].accuracy = p.accuracy; });
-  state.C = coach(state.match, state.A);
-  state.CO = buildCallouts(state.match, state.A);
+  // running score (classic to 11 / rally to 15) from labeled + auto-detected rally winners
+  state.S = state.A.score = computeScore(state.A.rallies, state.R.winners, scoringOf(m.cfg), m.players.length > 2);
+  state.C = coach(m, state.A);
+  state.CO = buildCallouts(m, state.A);
 }
+
+const teamName = tm => {
+  const P = state.match.players.filter(p => p.team === tm);
+  const mine = tm === (state.match.cfg.myTeam || 'A');
+  return P.length === 1 ? P[0].label : `${mine ? 'Your team' : 'Opponents'}`;
+};
 
 async function openMatch(match, isNew = false) {
   if (state.erase?.on) closeEraser();
@@ -576,7 +591,7 @@ function renderReview() {
   const P = match.players;
   $('#reviewNote').textContent = R.labeledCount === R.totalRallies
     ? 'Scores use rally outcomes, what the opponent did with each shot, tactical fit and body mechanics.'
-    : `${R.labeledCount || 0}/${R.totalRallies || 0} rally outcomes labeled${R.autoCount ? `, ${R.autoCount} worked out automatically from serve order or put-aways` : ''}. Shots by the team that won a rally are penalised less. Label rallies in “Rallies & outcomes” to confirm winners and errors.`;
+    : `${R.labeledCount || 0}/${R.totalRallies || 0} rally outcomes labeled${R.autoCount ? `, ${R.autoCount} worked out automatically from serve order, balls landing out or put-aways` : ''}. Shots by the team that won a rally are penalised less. Label rallies in “Rallies & outcomes” to confirm winners and errors.`;
   $('#accTiles').innerHTML = P.map((p, k) => {
     const pp = R.perPlayer[k];
     return `<div class="acc-tile" style="border-top-color:${playerColor(P, k)}">
@@ -770,7 +785,7 @@ $('#exportDlg').addEventListener('cancel', e => { if (ex.running) e.preventDefau
 $('#exStart').addEventListener('click', async () => {
   const segs = exportSegments(exForm.range.value);
   if (!segs.length) return;
-  const o = Object.fromEntries(['box', 'skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes', 'coach'].map(k => [k, exForm[k].checked]));
+  const o = Object.fromEntries(['box', 'skel', 'court', 'ball', 'labels', 'minimap', 'hud', 'notes', 'coach', 'score'].map(k => [k, exForm[k].checked]));
   o.shot = o.hud;
   o.coachWho = $('#tCoachWho').value;
   const mp4 = canEncodeMp4();
@@ -927,7 +942,7 @@ $$('.speed button').forEach(b => b.addEventListener('click', () => {
   video.playbackRate = +b.dataset.rate;
   $$('.speed button').forEach(x => x.classList.toggle('active', x === b));
 }));
-['#tBox', '#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
+['#tBox', '#tSkel', '#tBall', '#tCourt', '#tLabels', '#tCoach', '#tCoachWho', '#tScore'].forEach(id => $(id).addEventListener('change', () => drawOverlayNow(true)));
 $('#tCoachWho').addEventListener('change', () => { if (state.lens === 'callouts') renderFindings(); });
 $('#tCourtMode').addEventListener('change', e => {
   if (!state.match) return;
@@ -998,7 +1013,7 @@ function poseAt(k, t) {
   return near ? near.p[k] : null;
 }
 
-const viewOverlayOpts = () => ({ box: $('#tBox').checked, court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true, coach: $('#tCoach').checked, coachWho: $('#tCoachWho').value });
+const viewOverlayOpts = () => ({ box: $('#tBox').checked, court: $('#tCourt').checked, skel: $('#tSkel').checked, labels: $('#tLabels').checked, ball: $('#tBall').checked, shot: true, coach: $('#tCoach').checked, score: $('#tScore').checked, coachWho: $('#tCoachWho').value });
 
 /** Team filter for coach callouts: 'all' | 'mine' | 'opp' -> 'all' | 'A' | 'B'. */
 function calloutTeam(who) {
@@ -1065,6 +1080,15 @@ function drawOverlayLayer(ctx, w, h, t, o = viewOverlayOpts()) {
       ctx.beginPath(); ctx.arc(b[0] * w, b[1] * h, Math.max(3, w / 300), 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalAlpha = 1;
+  }
+  // line calls: red OUT marker where the ball landed
+  if ((o.ball || o.coach) && A.lineCalls) drawOutMarker(ctx, w, h, t, A.lineCalls);
+  // scoreboard
+  if (o.score && state.S?.rallies.length) {
+    drawScoreboard(ctx, w, h, scoreAt(state.S, A.rallies, t), {
+      mode: state.S.mode, doubles: match.players.length > 2, unknown: state.S.unknown,
+      names: { A: teamName('A'), B: teamName('B') }, colors: TEAM_COLORS,
+    });
   }
   // coach callouts: speech bubbles above the player
   if (o.coach && state.CO?.length) {
@@ -1276,12 +1300,25 @@ function renderStats() {
     </table>`;
   } else if (tab === 'rallies') {
     const opt = (v, cur, label) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${label}</option>`;
-    html = `<p class="muted small">Label who won each rally and how it ended — this unlocks error analysis and ranks findings by points lost. Saved automatically.</p>
-    <div style="max-height:380px;overflow:auto"><table><tr><th>#</th><th>Time</th><th>Shots</th><th>Server</th><th>Winner</th><th>Ended by</th><th>Player</th><th></th></tr>
+    const S = state.S, mode = scoringOf(match.cfg);
+    const fin = S?.rallies.at(-1)?.after;
+    const autoTxt = i => {
+      const src = state.R.autoSources?.[i], lc = A.lineCalls?.[i];
+      const bits = [];
+      if (!r0(i) && state.R.winners[i]) bits.push(`auto: ${state.R.winners[i] === 'A' ? 'near' : 'far'} team won (${src || 'auto'})`);
+      if (lc?.out) bits.push(`🚩 OUT ${lc.how}`);
+      return bits.length ? `<div class="muted small">${bits.join(' · ')}</div>` : '';
+    };
+    const r0 = i => A.rallies[i].outcome?.winner;
+    html = `<p class="small"><b>${mode.name}</b> (change in ⚙ Players & settings)${fin ? ` · now: ${esc(teamName('A'))} <b>${fin.A}</b> – <b>${fin.B}</b> ${esc(teamName('B'))}, game ${fin.game}${fin.games.A + fin.games.B ? `, games ${fin.games.A}–${fin.games.B}` : ''}` : ''}${S?.unknown ? ` · <span class="muted">${S.unknown} rally winner${S.unknown > 1 ? 's' : ''} unknown — the score may be off; label them below</span>` : ''}</p>
+    <p class="muted small">Label who won each rally and how it ended — this unlocks error analysis and ranks findings by points lost. Unlabeled rallies are worked out from serve order, balls landing out and put-aways. Saved automatically.</p>
+    <div style="max-height:380px;overflow:auto"><table><tr><th>#</th><th>Time</th><th>Shots</th><th>Server</th><th>Score</th><th>Winner</th><th>Ended by</th><th>Player</th><th></th></tr>
     ${A.rallies.map(r => {
       const o = r.outcome || {};
+      const sc = S?.rallies[r.index];
       return `<tr class="rally-row" data-rid="${r.id}">
         <td>${r.index + 1}</td><td class="mono">${fmtTime(r.start)}</td><td>${r.shots.length}</td><td>${esc(P[r.serverSlot].label)}</td>
+        <td class="mono" title="Score called before the serve → after the rally">${sc ? `${sc.call} → ${sc.after.A}-${sc.after.B}${sc.gameOver ? ' 🏁' : ''}` : '–'}${autoTxt(r.index)}</td>
         <td><select data-f="winner">${opt('', o.winner || '', '–')}${opt('A', o.winner, 'Near team')}${opt('B', o.winner, 'Far team')}</select></td>
         <td><select data-f="how">${opt('', o.how || '', '–')}${opt('winner', o.how, 'Winner')}${opt('error', o.how, 'Error')}</select></td>
         <td><select data-f="by">${opt('-1', String(o.by ?? -1), '–')}${P.map((p, k) => opt(String(k), String(o.by ?? -1), esc(p.label))).join('')}</select></td>
@@ -1316,6 +1353,11 @@ $('#statBody').addEventListener('change', e => {
     recompute();
     $('#coachSummary').innerHTML = state.C.summary;
     renderFindings(); renderReview(); drawTimelineNow();
+    // refresh the score column, keeping the table scrolled where it was
+    const box = $('#statBody').querySelector('div[style*="overflow"]'), top = box?.scrollTop || 0;
+    renderStats();
+    const box2 = $('#statBody').querySelector('div[style*="overflow"]'); if (box2) box2.scrollTop = top;
+    drawOverlayNow(true);
     persist();
   }, 400);
 });
@@ -1326,6 +1368,7 @@ $('#btnSettings').addEventListener('click', () => {
   const P = match.players;
   $('#playerEdit').innerHTML = `
     <label>Skill level <select name="skill">${['3.0', '3.5', '4.0', '4.5'].map(s => `<option ${s === match.cfg.skill ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+    <label>Scoring <select name="scoring">${Object.values(SCORING).map(s => `<option value="${s.id}" ${s.id === scoringOf(match.cfg).id ? 'selected' : ''}>${s.name}</option>`).join('')}</select></label>
     <label>Your team <select name="myTeam"><option value="A" ${match.cfg.myTeam === 'A' ? 'selected' : ''}>Near side</option><option value="B" ${match.cfg.myTeam === 'B' ? 'selected' : ''}>Far side</option></select></label>
     <h3>Players <span class="muted small">(name · “me”)</span></h3>
     ${P.map((p, k) => `<div class="player-edit-row"><i style="background:${playerColor(P, k)}"></i>
@@ -1371,6 +1414,7 @@ $('#settingsDlg').addEventListener('close', () => {
   match.cfg.skill = form.skill.value;
   match.cfg.myTeam = form.myTeam.value;
   match.cfg.sensitivity = +form.sensitivity.value;
+  match.cfg.scoring = form.scoring.value;
   recompute();
   renderAnalysis();
   persist();
